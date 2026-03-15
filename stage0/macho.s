@@ -95,7 +95,8 @@
 .set NUM_LOAD_CMDS,       4      // LC_SEGMENT_64, LC_BUILD_VERSION, LC_SYMTAB, LC_DYSYMTAB
 
 // Internal relocation entry size (our format)
-.set INT_RELOC_SIZE,      16
+// Layout: address(4), reserved(4), sym_entry_ptr(8), type(4), flags(4)
+.set INT_RELOC_SIZE,      24
 // Internal symbol entry size (our format)
 .set INT_SYM_SIZE,        32
 
@@ -214,7 +215,7 @@ _macho_init:
 // =============================================================================
 // _macho_add_reloc — Add a relocation entry to the internal array
 //   x0 = address (offset within section)
-//   x1 = sym_index (index in symbol table)
+//   x1 = sym_entry_ptr (pointer to symbol entry from symtab.s)
 //   x2 = type (ARM64_RELOC_* type)
 //   x3 = pcrel (0 or 1)
 //   x4 = extern_flag (0 or 1)
@@ -328,14 +329,16 @@ Lmar_have_space:
     mov     x2, #INT_RELOC_SIZE
     madd    x0, x1, x2, x0             // x0 = &entry[count]
 
-    // Write the internal relocation entry (16 bytes):
+    // Write the internal relocation entry (24 bytes):
     //   offset 0:  address (4 bytes)
-    //   offset 4:  sym_index (4 bytes)
-    //   offset 8:  type (4 bytes)
-    //   offset 12: flags (4 bytes) — bit 0: pcrel, bit 1: extern, bits 4-5: length
+    //   offset 4:  reserved (4 bytes)
+    //   offset 8:  sym_entry_ptr (8 bytes)
+    //   offset 16: type (4 bytes)
+    //   offset 20: flags (4 bytes) — bit 0: pcrel, bit 1: extern, bits 4-5: length
     str     w19, [x0, #0]              // address
-    str     w20, [x0, #4]              // sym_index
-    str     w21, [x0, #8]              // type
+    str     wzr, [x0, #4]             // reserved
+    str     x20, [x0, #8]             // sym_entry_ptr (8 bytes)
+    str     w21, [x0, #16]            // type
 
     // Pack flags: bit 0 = pcrel, bit 1 = extern, bits 4-5 = length
     and     w22, w22, #1               // pcrel & 1
@@ -345,7 +348,7 @@ Lmar_have_space:
     lsl     w24, w24, #4               // length << 4
     orr     w22, w22, w23
     orr     w22, w22, w24
-    str     w22, [x0, #12]             // flags
+    str     w22, [x0, #20]             // flags
 
     // Increment count
     add     x1, x1, #1
@@ -1232,11 +1235,12 @@ Lme_skip_data:
 Lme_reloc_loop:
     cbz     x12, Lme_skip_relocs
 
-    // Read internal reloc entry (16 bytes)
+    // Read internal reloc entry (24 bytes)
     ldr     w0, [x10, #0]              // r_address
-    ldr     w1, [x10, #4]              // sym_index
-    ldr     w2, [x10, #8]              // type
-    ldr     w3, [x10, #12]             // flags
+    ldr     x1, [x10, #8]             // sym_entry_ptr (8 bytes)
+    ldr     w1, [x1, #40]             // nlist_index from symbol entry
+    ldr     w2, [x10, #16]            // type
+    ldr     w3, [x10, #20]            // flags
 
     // Write r_address
     str     w0, [x11, #0]

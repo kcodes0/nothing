@@ -69,7 +69,7 @@ for test_file in "$SCRIPT_DIR"/test_*.s; do
             continue
         fi
     else
-        if ! "$ASM" "$test_file" -o "$obj_file" 2>/dev/null; then
+        if ! "$ASM" "$test_file" "$obj_file" 2>/dev/null; then
             printf "${RED}FAIL${NC} %-20s (assembler failed)\n" "$test_name"
             FAIL=$((FAIL + 1))
             continue

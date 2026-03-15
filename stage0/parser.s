@@ -1664,10 +1664,19 @@ Lp2_mov_wide_done:
     b       Lp2_loop
 
 Lp2_mov_reg:
-    // mov Rd, Rm → orr Rd, xzr, Rm
+    // mov Rd, Rm — but if SP is involved, encode as ADD Rd, Rm, #0
+    // (ORR interprets reg 31 as XZR, not SP)
     bl      _parse_read_register
     mov     x23, x0                     // Rm
+    // x2 = is_sp from _lookup_register (returned through _parse_read_register)
 
+    // Check if Rd==31 or Rm==31 — if so, one might be SP, use ADD encoding
+    cmp     x21, #31
+    b.eq    Lp2_mov_reg_add
+    cmp     x23, #31
+    b.eq    Lp2_mov_reg_add
+
+    // Normal case: orr Rd, xzr, Rm
     mov     x0, #1
     sub     x0, x0, x22                 // sf
     mov     x1, #0b01                   // opc = ORR
@@ -1678,6 +1687,20 @@ Lp2_mov_reg:
     mov     x6, #0                      // shift = LSL
     mov     x7, #0                      // amt = 0
     bl      _enc_logic_reg
+    bl      Lemit_inst
+    bl      _parse_skip_to_newline
+    b       Lp2_loop
+
+Lp2_mov_reg_add:
+    // mov Rd, SP  or  mov SP, Rm → encode as ADD Rd, Rm, #0
+    mov     x0, #1
+    sub     x0, x0, x22                 // sf
+    mov     x1, #0                      // op = ADD
+    mov     x2, #0                      // setflags = 0
+    mov     x3, x21                     // Rd
+    mov     x4, x23                     // Rn (the source register)
+    mov     x5, #0                      // imm12 = 0
+    bl      _enc_add_imm
     bl      Lemit_inst
     bl      _parse_skip_to_newline
     b       Lp2_loop
@@ -1952,20 +1975,19 @@ Lp2_b:
 
 Lp2_b_extern:
     // External/undefined symbol — emit relocation
-    // Re-add symbol to ensure it is in symtab
+    // Re-add symbol to ensure it is in symtab and marked global
     ldr     x0, [x19, #TOK_TEXT_OFF]
     ldr     x1, [x19, #TOK_LEN_OFF]
     bl      _sym_add
     mov     x21, x0
+    mov     x0, x21
+    bl      _sym_set_global
 
-    // Get nlist index
-    ldr     w22, [x21, #40]            // nlist_index
-
-    // Record relocation
+    // Record relocation (pass sym entry ptr, nlist_index resolved at emit time)
     adrp    x8, _parse_text_size@PAGE
     add     x8, x8, _parse_text_size@PAGEOFF
     ldr     x0, [x8]                    // address = current text offset
-    mov     x1, x22                     // sym_index
+    mov     x1, x21                     // sym_entry_ptr
     mov     x2, #ARM64_RELOC_BRANCH26   // type
     mov     x3, #1                      // pcrel = 1
     mov     x4, #1                      // extern = 1
@@ -2009,12 +2031,13 @@ Lp2_bl_extern:
     ldr     x1, [x19, #TOK_LEN_OFF]
     bl      _sym_add
     mov     x21, x0
-    ldr     w22, [x21, #40]
+    mov     x0, x21
+    bl      _sym_set_global
 
     adrp    x8, _parse_text_size@PAGE
     add     x8, x8, _parse_text_size@PAGEOFF
     ldr     x0, [x8]
-    mov     x1, x22
+    mov     x1, x21                     // sym_entry_ptr
     mov     x2, #ARM64_RELOC_BRANCH26
     mov     x3, #1
     mov     x4, #1
@@ -2097,12 +2120,13 @@ Lp2_bcond_extern:
     ldr     x1, [x19, #TOK_LEN_OFF]
     bl      _sym_add
     mov     x21, x0
-    ldr     w23, [x21, #40]
+    mov     x0, x21
+    bl      _sym_set_global
 
     adrp    x8, _parse_text_size@PAGE
     add     x8, x8, _parse_text_size@PAGEOFF
     ldr     x0, [x8]
-    mov     x1, x23
+    mov     x1, x21                     // sym_entry_ptr
     mov     x2, #ARM64_RELOC_BRANCH26
     mov     x3, #1
     mov     x4, #1
@@ -2547,14 +2571,14 @@ Lp2_adrp:
     ldr     x1, [x19, #TOK_LEN_OFF]
     bl      _sym_add
     mov     x22, x0                     // sym entry
+    mov     x0, x22
+    bl      _sym_set_global
 
     // Record PAGE21 relocation
-    ldr     w23, [x22, #40]            // nlist_index
-
     adrp    x8, _parse_text_size@PAGE
     add     x8, x8, _parse_text_size@PAGEOFF
     ldr     x0, [x8]                    // address
-    mov     x1, x23                     // sym_index
+    mov     x1, x22                     // sym_entry_ptr
     mov     x2, #ARM64_RELOC_PAGE21     // type
     mov     x3, #1                      // pcrel
     mov     x4, #1                      // extern
