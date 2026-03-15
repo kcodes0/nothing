@@ -8,7 +8,7 @@ for f in irc.s ir_lexer.s ir_parser.s codegen.s; do
     as -arch arm64 -o "$DIR/${f%.s}.o" "$DIR/$f"
 done
 echo "  Linking..."
-ld -arch arm64 -platform_version macos 14.0 14.0 \
+ld -arch arm64 -platform_version macos 15.5 15.5 \
     -syslibroot "$SDK" -lSystem \
     -o "$DIR/irc" "$DIR/irc.o" "$DIR/ir_lexer.o" "$DIR/ir_parser.o" "$DIR/codegen.o"
 echo "Stage 1 IR compiler built: $DIR/irc"

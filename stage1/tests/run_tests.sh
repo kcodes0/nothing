@@ -47,7 +47,7 @@ for ir_file in "$DIR"/test_*.ir; do
     fi
 
     # Link
-    if ! ld -arch arm64 -platform_version macos 14.0 14.0 \
+    if ! ld -arch arm64 -platform_version macos 15.5 15.5 \
         -syslibroot "$SDK" -lSystem \
         -o "$TMPDIR_TEST/test" "$TMPDIR_TEST/test.o" 2>"$TMPDIR_TEST/ld_err.txt"; then
         echo "FAIL (ld failed)"

@@ -5,21 +5,16 @@
 .global _main
 .align 4
 
-// Syscall numbers for macOS
 .equ SYS_EXIT,    1
 .equ SYS_READ,    3
 .equ SYS_WRITE,   4
 .equ SYS_OPEN,    5
 .equ SYS_CLOSE,   6
-
-// Constants
-.equ MAX_FILE_SIZE, 1048576   // 1MB
-.equ MAX_OUTPUT,    4194304   // 4MB output buffer
+.equ MAX_FILE_SIZE, 1048576
+.equ MAX_OUTPUT,    4194304
 
 .text
 
-// _main(argc, argv)
-// x0 = argc, x1 = argv
 _main:
     stp     x29, x30, [sp, #-96]!
     mov     x29, sp
@@ -34,79 +29,77 @@ _main:
 
     // Check argc >= 2
     cmp     x19, #2
-    b.ge    .Largs_ok
-    // Print usage
-    adr     x1, msg_usage
-    mov     x2, #42
-    mov     x0, #2              // stderr
+    b.ge    1f
+    adrp    x1, _msg_usage@PAGE
+    add     x1, x1, _msg_usage@PAGEOFF
+    mov     x2, #31
+    mov     x0, #2
     mov     x16, #SYS_WRITE
     svc     #0x80
     mov     x0, #1
-    b       .Lexit
+    b       99f
 
-.Largs_ok:
-    // Open file (argv[1])
-    ldr     x0, [x20, #8]      // argv[1]
-    mov     x1, #0              // O_RDONLY
+1:  // Open file argv[1]
+    ldr     x0, [x20, #8]
+    mov     x1, #0
     mov     x2, #0
     mov     x16, #SYS_OPEN
     svc     #0x80
-    // Check for error (carry flag set on error for macOS)
-    b.cs    .Lopen_error
+    b.cs    90f
     mov     x21, x0             // fd
 
     // Allocate read buffer
     mov     x0, #MAX_FILE_SIZE
     bl      _malloc
-    mov     x22, x0             // read buffer
+    mov     x22, x0
 
     // Read file
-    mov     x0, x21             // fd
-    mov     x1, x22             // buffer
+    mov     x0, x21
+    mov     x1, x22
     mov     x2, #MAX_FILE_SIZE
     mov     x16, #SYS_READ
     svc     #0x80
-    b.cs    .Lread_error
-    mov     x23, x0             // bytes read
+    b.cs    91f
+    mov     x23, x0             // bytes_read
 
     // Close file
     mov     x0, x21
     mov     x16, #SYS_CLOSE
     svc     #0x80
 
-    // Allocate token buffer (space for ~16384 tokens * 32 bytes = 512KB)
+    // Allocate token buffer (16384 tokens * 32 bytes)
     mov     x0, #524288
     bl      _malloc
-    mov     x24, x0             // token buffer
+    mov     x24, x0
 
-    // Call lexer: lexer_tokenize(src, src_len, token_buf) -> num_tokens
-    mov     x0, x22             // source text
-    mov     x1, x23             // source length
-    mov     x2, x24             // token buffer
+    // Lex
+    mov     x0, x22
+    mov     x1, x23
+    mov     x2, x24
     bl      _lexer_tokenize
     mov     x25, x0             // num_tokens
 
     // Allocate output buffer
     mov     x0, #MAX_OUTPUT
     bl      _malloc
-    mov     x26, x0             // output buffer
+    mov     x26, x0
 
-    // Call parser + codegen: parse_and_codegen(tokens, num_tokens, src, output_buf) -> output_len
-    mov     x0, x24             // tokens
-    mov     x1, x25             // num_tokens
-    mov     x2, x22             // source text (for string refs)
-    mov     x3, x26             // output buffer
+    // Parse and codegen
+    mov     x0, x24
+    mov     x1, x25
+    mov     x2, x22
+    mov     x3, x26
     bl      _parse_and_codegen
-    mov     x27, x0             // output length
+    mov     x27, x0             // output_len
 
     // Write output to stdout
-    mov     x0, #1              // stdout
-    mov     x1, x26             // buffer
-    mov     x2, x27             // length
+    mov     x0, #1
+    mov     x1, x26
+    mov     x2, x27
     mov     x16, #SYS_WRITE
     svc     #0x80
 
-    // Free buffers
+    // Free
     mov     x0, x22
     bl      _free
     mov     x0, x24
@@ -114,29 +107,29 @@ _main:
     mov     x0, x26
     bl      _free
 
-    // Exit success
     mov     x0, #0
-    b       .Lexit
+    b       99f
 
-.Lopen_error:
-    adr     x1, msg_open_err
+90: // open error
+    adrp    x1, _msg_open_err@PAGE
+    add     x1, x1, _msg_open_err@PAGEOFF
     mov     x2, #24
     mov     x0, #2
     mov     x16, #SYS_WRITE
     svc     #0x80
     mov     x0, #1
-    b       .Lexit
+    b       99f
 
-.Lread_error:
-    adr     x1, msg_read_err
-    mov     x2, #18
+91: // read error
+    adrp    x1, _msg_read_err@PAGE
+    add     x1, x1, _msg_read_err@PAGEOFF
+    mov     x2, #19
     mov     x0, #2
     mov     x16, #SYS_WRITE
     svc     #0x80
     mov     x0, #1
-    b       .Lexit
 
-.Lexit:
+99: // exit
     ldp     x19, x20, [sp, #16]
     ldp     x21, x22, [sp, #32]
     ldp     x23, x24, [sp, #48]
@@ -146,7 +139,7 @@ _main:
     ret
 
 .data
-msg_usage:      .ascii "Usage: irc <input.ir>\n"
-                .ascii "Stage 1 IR Compiler\n"
-msg_open_err:   .ascii "Error: cannot open file\n"
-msg_read_err:   .ascii "Error: read failed\n"
+_msg_usage:     .ascii "Usage: irc <input.ir>\n"
+                .ascii "         \n"
+_msg_open_err:  .ascii "Error: cannot open file\n"
+_msg_read_err:  .ascii "Error: read failed\n"
