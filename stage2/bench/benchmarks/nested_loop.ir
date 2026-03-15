@@ -1,4 +1,4 @@
-// expect: 64
+// expect: 0
 func @main() -> i64 {
 entry:
   br @outer
@@ -11,12 +11,12 @@ inner:
   %count1 = phi i64 [%count, @outer], [%count_next, @inner]
   %count_next = add i64 %count1, 1
   %ii_next = add i64 %ii, 1
-  %inner_done = cmp_ge i64 %ii_next, 1000
+  %inner_done = cmp_ge i64 %ii_next, 8000
   br_cond %inner_done, @outer_inc, @inner
 outer_inc:
   %count2 = phi i64 [%count_next, @inner]
   %oi_next = add i64 %oi, 1
-  %outer_done = cmp_ge i64 %oi_next, 1000
+  %outer_done = cmp_ge i64 %oi_next, 8000
   br_cond %outer_done, @done, @outer
 done:
   %total = phi i64 [%count2, @outer_inc]
