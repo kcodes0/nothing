@@ -1,4 +1,4 @@
-// expect: 244
+// expect: 20
 func @main() -> i64 {
 entry:
   br @loop
