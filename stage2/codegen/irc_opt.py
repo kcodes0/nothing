@@ -562,6 +562,26 @@ class IRCompiler:
             if preg in CALLEE_SAVED:
                 used_callee.add(preg)
 
+        # Pre-scan for constants needing register preloading (affects callee-saved usage)
+        _REG_ONLY_OPS = {'mul', 'div', 'mod', 'and', 'or', 'xor'}
+        _pre_needs = set()
+        for instr in all_instrs:
+            if instr.op in _REG_ONLY_OPS:
+                for op in instr.operands:
+                    if is_immediate(op) and imm_val(op) != 0:
+                        _pre_needs.add(imm_val(op))
+            elif instr.op in CMP_OPS:
+                for op in instr.operands:
+                    if is_immediate(op) and not fits_12bit(abs(imm_val(op))):
+                        _pre_needs.add(imm_val(op))
+
+        _const_pool_regs = []
+        for r in ['x27', 'x28', 'x26', 'x25']:
+            if r not in reg_assignment.values():
+                _const_pool_regs.append(r)
+        for i, v in enumerate(sorted(_pre_needs)[:len(_const_pool_regs)]):
+            used_callee.add(_const_pool_regs[i])
+
         # Count max simultaneous caller-saved regs that need saving around calls
         max_caller_save = 0
         for instr in all_instrs:
@@ -631,15 +651,34 @@ class IRCompiler:
                 off = spill_base + spill_slots[vreg] * 8
                 self.output.append(f'    str {src_reg}, [x29, #{off}]')
 
+        # Constant hoisting: reuse registers for repeated constant loads
+        const_reg_cache = {}  # imm_value -> register holding it
+
         def load_operand(op, target_reg=SCRATCH1):
             if is_vreg(op):
                 return ensure_in_reg(op, target_reg)
             elif is_immediate(op):
                 v = imm_val(op)
+                # Check if this constant is already in a register
+                if v in const_reg_cache:
+                    return const_reg_cache[v]
                 for l in emit_mov_imm(target_reg, v):
                     self.output.append(l)
+                # Cache if it required more than one instruction (worth hoisting)
+                if len(emit_mov_imm(target_reg, v)) > 1 or not fits_12bit(abs(v)):
+                    const_reg_cache[v] = target_reg
                 return target_reg
             raise RuntimeError(f"Unknown operand: {op}")
+
+        def clear_const_cache(*regs):
+            """Invalidate cached constants in specified registers."""
+            for r in regs:
+                to_remove = [k for k, v in const_reg_cache.items() if v == r]
+                for k in to_remove:
+                    del const_reg_cache[k]
+
+        def clear_const_cache_all():
+            const_reg_cache.clear()
 
         def result_reg(instr):
             if instr.result in reg_assignment:
@@ -692,10 +731,68 @@ class IRCompiler:
                 offset += 16
         self.output.append(f'    mov x29, sp')
 
+        # ===================================================================
+        # Constant preloading: find immediate values that need multi-instr
+        # materialization and are used in ops without immediate forms (mul,
+        # div, mod) or are large (>12 bit) for cmp. Pre-load into scratch
+        # registers before the first block so they survive across loops.
+        # ===================================================================
+        preload_regs = {}  # imm_value -> register name
+        needs_preload = set()  # set of immediate values needing preload
+
+        # Ops that have no immediate form — must use register for 2nd operand
+        REG_ONLY_OPS = {'mul', 'div', 'mod', 'and', 'or', 'xor'}
+        for instr in all_instrs:
+            if instr.op in REG_ONLY_OPS:
+                for op in instr.operands:
+                    if is_immediate(op):
+                        v = imm_val(op)
+                        if v != 0:  # 0 can use xzr
+                            needs_preload.add(v)
+            elif instr.op in CMP_OPS:
+                for op in instr.operands:
+                    if is_immediate(op) and not fits_12bit(abs(imm_val(op))):
+                        needs_preload.add(imm_val(op))
+
+        # Assign registers for preloaded constants
+        # Use caller-saved regs that aren't used as scratch: x2-x7 are unused
+        # by our codegen except for call args. Use x2-x7 for constants if
+        # they're not used for call args in this function. Actually safer to
+        # just use additional callee-saved regs or specific scratch regs.
+        # Use x27, x28 (callee-saved we can add to save list), and x8, x16-x17
+        # which are our scratch regs but only within a single instruction emission.
+        # Between instructions, scratch regs are free — BUT they get overwritten.
+        # So we need callee-saved regs for constants that survive across instructions.
+        #
+        # We'll steal from the callee-saved pool: use x27, x28 for up to 2 constants.
+        # If the register allocator already used them, we can't. Check.
+        const_pool_regs = []
+        for r in ['x27', 'x28', 'x26', 'x25']:
+            if r not in reg_assignment.values():
+                const_pool_regs.append(r)
+
+        preload_values = sorted(needs_preload)[:len(const_pool_regs)]
+        preload_save_regs = set()
+        for i, v in enumerate(preload_values):
+            reg = const_pool_regs[i]
+            preload_regs[v] = reg
+            preload_save_regs.add(reg)
+            const_reg_cache[v] = reg  # Pre-fill the cache
+
+        # Emit preload instructions right after prologue
+        if preload_regs:
+            for v, reg in preload_regs.items():
+                for l in emit_mov_imm(reg, v):
+                    self.output.append(l)
+
         # Emit blocks
         for bi, bname in enumerate(func.block_order):
             block = func.blocks[bname]
             self.output.append(f'.LBB_{func.name}_{bname}:')
+            # Reset the volatile cache but keep preloaded constants
+            volatile_keys = [k for k in const_reg_cache if k not in preload_regs]
+            for k in volatile_keys:
+                del const_reg_cache[k]
 
             for instr in block.instructions:
                 # Skip dead instructions
