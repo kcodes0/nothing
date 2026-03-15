@@ -6,12 +6,16 @@ PROJ="$DIR/../.."
 IRC="${IRC:-$PROJ/stage1/irc}"
 ASM="${ASM:-as}"  # Use system as by default, switch to stage0/asm later
 ASM_OPT="${PROJ}/stage2/passes/asm_peephole.py"
+REGALLOC="${PROJ}/stage2/passes/regalloc.py"
 OUT="$DIR/out"
 mkdir -p "$OUT"
 
 echo "=== Compiling benchmarks ==="
 if [ "${USE_ASM_OPT:-0}" = "1" ]; then
     echo "(assembly peephole optimization enabled)"
+fi
+if [ "${USE_REGALLOC:-0}" = "1" ]; then
+    echo "(register allocation optimization enabled)"
 fi
 PASS=0
 FAIL=0
@@ -33,6 +37,14 @@ for bench in "$DIR"/benchmarks/*.ir; do
     if [ "${USE_ASM_OPT:-0}" = "1" ]; then
         if ! python3 "$ASM_OPT" < "$OUT/${name}.s" > "$OUT/${name}_opt.s" 2>/dev/null; then
             echo "FAIL $name (asm peephole failed)"
+            FAIL=$((FAIL + 1))
+            continue
+        fi
+        mv "$OUT/${name}_opt.s" "$OUT/${name}.s"
+    fi
+    if [ "${USE_REGALLOC:-0}" = "1" ]; then
+        if ! python3 "$REGALLOC" < "$OUT/${name}.s" > "$OUT/${name}_opt.s" 2>/dev/null; then
+            echo "FAIL $name (regalloc failed)"
             FAIL=$((FAIL + 1))
             continue
         fi
