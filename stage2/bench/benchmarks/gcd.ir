@@ -1,0 +1,23 @@
+// expect: 6
+func @gcd(i64, i64) -> i64 {
+entry:
+  %a_init = arg i64 0
+  %b_init = arg i64 1
+  br @loop
+loop:
+  %a = phi i64 [%a_init, @entry], [%b, @step]
+  %b = phi i64 [%b_init, @entry], [%rem, @step]
+  %is_zero = cmp_eq i64 %b, 0
+  br_cond %is_zero, @done, @step
+step:
+  %rem = mod i64 %a, %b
+  br @loop
+done:
+  ret i64 %a
+}
+
+func @main() -> i64 {
+entry:
+  %r = call i64 @gcd, i64 48, i64 18
+  ret i64 %r
+}

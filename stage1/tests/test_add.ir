@@ -1,0 +1,6 @@
+// expect: 42
+func @main() -> i64 {
+entry:
+  %x = add i64 20, 22
+  ret i64 %x
+}

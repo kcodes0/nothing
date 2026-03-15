@@ -1,0 +1,9 @@
+// expect: 170
+func @main() -> i64 {
+entry:
+  %a = add i64 255, 0
+  %b = add i64 85, 0
+  %x = xor i64 %a, %b
+  %y = and i64 %x, 255
+  ret i64 %y
+}

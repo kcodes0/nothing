@@ -1,0 +1,24 @@
+// expect: 100
+func @main() -> i64 {
+entry:
+  br @outer
+outer:
+  %oi = phi i64 [0, @entry], [%oi_next, @outer_inc]
+  %count = phi i64 [0, @entry], [%count2, @outer_inc]
+  br @inner
+inner:
+  %ii = phi i64 [0, @outer], [%ii_next, @inner]
+  %count1 = phi i64 [%count, @outer], [%count_next, @inner]
+  %count_next = add i64 %count1, 1
+  %ii_next = add i64 %ii, 1
+  %inner_done = cmp_ge i64 %ii_next, 10
+  br_cond %inner_done, @outer_inc, @inner
+outer_inc:
+  %count2 = phi i64 [%count_next, @inner]
+  %oi_next = add i64 %oi, 1
+  %outer_done = cmp_ge i64 %oi_next, 10
+  br_cond %outer_done, @done, @outer
+done:
+  %r = phi i64 [%count2, @outer_inc]
+  ret i64 %r
+}

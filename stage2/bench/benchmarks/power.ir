@@ -1,0 +1,15 @@
+// expect: 0
+func @main() -> i64 {
+entry:
+  br @loop
+loop:
+  %i = phi i64 [0, @entry], [%i_next, @loop]
+  %result = phi i64 [1, @entry], [%next, @loop]
+  %next = mul i64 %result, 2
+  %i_next = add i64 %i, 1
+  %done = cmp_ge i64 %i_next, 10
+  br_cond %done, @finish, @loop
+finish:
+  %r = mod i64 %next, 256
+  ret i64 %r
+}

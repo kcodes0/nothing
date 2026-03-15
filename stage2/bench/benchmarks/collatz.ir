@@ -1,0 +1,27 @@
+// expect: 111
+func @main() -> i64 {
+entry:
+  br @loop
+loop:
+  %n = phi i64 [27, @entry], [%n_next, @update]
+  %steps = phi i64 [0, @entry], [%steps_next, @update]
+  %is_one = cmp_eq i64 %n, 1
+  br_cond %is_one, @done, @check_even
+check_even:
+  %rem = mod i64 %n, 2
+  %is_even = cmp_eq i64 %rem, 0
+  br_cond %is_even, @even, @odd
+even:
+  %n_even = div i64 %n, 2
+  br @update
+odd:
+  %n_mul = mul i64 %n, 3
+  %n_odd = add i64 %n_mul, 1
+  br @update
+update:
+  %n_next = phi i64 [%n_even, @even], [%n_odd, @odd]
+  %steps_next = add i64 %steps, 1
+  br @loop
+done:
+  ret i64 %steps
+}

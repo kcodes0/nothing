@@ -1,0 +1,12 @@
+// expect: 1
+func @main() -> i64 {
+entry:
+  %a = add i64 10, 0
+  %b = add i64 20, 0
+  %c = cmp_lt i64 %a, %b
+  br_cond %c, @yes, @no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}

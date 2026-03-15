@@ -1,0 +1,13 @@
+// expect: 42
+func @double(i64) -> i64 {
+entry:
+  %x = arg i64 0
+  %r = add i64 %x, %x
+  ret i64 %r
+}
+
+func @main() -> i64 {
+entry:
+  %r = call i64 @double, i64 21
+  ret i64 %r
+}
