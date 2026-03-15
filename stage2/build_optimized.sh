@@ -14,8 +14,10 @@ cat "$INPUT" | \
     python3 "$DIR/passes/dce.py" | \
     python3 "$DIR/passes/peephole.py" > "$OPTIMIZED"
 
-# Compile: IR -> asm -> .o -> binary
+# Compile: IR -> asm -> asm peephole optimize -> .o -> binary
 "$DIR/../stage1/irc" "$OPTIMIZED" > "${OPTIMIZED}.s"
+python3 "$DIR/passes/asm_peephole.py" < "${OPTIMIZED}.s" > "${OPTIMIZED}_opt.s"
+mv "${OPTIMIZED}_opt.s" "${OPTIMIZED}.s"
 as -arch arm64 -o "${OPTIMIZED}.o" "${OPTIMIZED}.s"
 ld -arch arm64 -platform_version macos 14.0 14.0 \
    -syslibroot "$SDK" -lSystem -e _main \

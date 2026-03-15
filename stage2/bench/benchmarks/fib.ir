@@ -1,9 +1,9 @@
-// expect: 109
+// expect: 197
 func @main() -> i64 {
 entry:
   br @loop
 loop:
-  %n = phi i64 [20, @entry], [%n_next, @loop]
+  %n = phi i64 [20000000, @entry], [%n_next, @loop]
   %a = phi i64 [0, @entry], [%b_val, @loop]
   %b_val = phi i64 [1, @entry], [%next, @loop]
   %next = add i64 %a, %b_val

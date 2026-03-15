@@ -5,10 +5,14 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ="$DIR/../.."
 IRC="${IRC:-$PROJ/stage1/irc}"
 ASM="${ASM:-as}"  # Use system as by default, switch to stage0/asm later
+ASM_OPT="${PROJ}/stage2/passes/asm_peephole.py"
 OUT="$DIR/out"
 mkdir -p "$OUT"
 
 echo "=== Compiling benchmarks ==="
+if [ "${USE_ASM_OPT:-0}" = "1" ]; then
+    echo "(assembly peephole optimization enabled)"
+fi
 PASS=0
 FAIL=0
 TOTAL=0
@@ -20,11 +24,19 @@ for bench in "$DIR"/benchmarks/*.ir; do
     [ -z "$expected" ] && continue
     TOTAL=$((TOTAL + 1))
 
-    # Compile: IR -> asm -> .o -> executable
+    # Compile: IR -> asm (-> optional asm peephole) -> .o -> executable
     if ! "$IRC" "$bench" > "$OUT/${name}.s" 2>/dev/null; then
         echo "FAIL $name (irc failed)"
         FAIL=$((FAIL + 1))
         continue
+    fi
+    if [ "${USE_ASM_OPT:-0}" = "1" ]; then
+        if ! python3 "$ASM_OPT" < "$OUT/${name}.s" > "$OUT/${name}_opt.s" 2>/dev/null; then
+            echo "FAIL $name (asm peephole failed)"
+            FAIL=$((FAIL + 1))
+            continue
+        fi
+        mv "$OUT/${name}_opt.s" "$OUT/${name}.s"
     fi
     if ! $ASM -arch arm64 -o "$OUT/${name}.o" "$OUT/${name}.s" 2>/dev/null; then
         echo "FAIL $name (assembler failed)"

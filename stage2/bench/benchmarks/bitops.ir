@@ -1,9 +1,19 @@
-// expect: 170
+// expect: 0
 func @main() -> i64 {
 entry:
+  br @loop
+loop:
+  %i = phi i64 [0, @entry], [%i_next, @loop]
+  %acc = phi i64 [0, @entry], [%acc_next, @loop]
   %a = add i64 255, 0
   %b = add i64 85, 0
   %x = xor i64 %a, %b
   %y = and i64 %x, 255
-  ret i64 %y
+  %acc_next = add i64 %acc, %y
+  %i_next = add i64 %i, 1
+  %done = cmp_ge i64 %i_next, 100000000
+  br_cond %done, @finish, @loop
+finish:
+  %r = mod i64 %acc_next, 256
+  ret i64 %r
 }

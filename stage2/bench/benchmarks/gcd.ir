@@ -1,4 +1,4 @@
-// expect: 6
+// expect: 0
 func @gcd(i64, i64) -> i64 {
 entry:
   %a_init = arg i64 0
@@ -18,6 +18,16 @@ done:
 
 func @main() -> i64 {
 entry:
-  %r = call i64 @gcd, i64 48, i64 18
+  br @loop
+loop:
+  %i = phi i64 [0, @entry], [%i_next, @loop]
+  %acc = phi i64 [0, @entry], [%acc_next, @loop]
+  %g = call i64 @gcd, i64 48, i64 18
+  %acc_next = add i64 %acc, %g
+  %i_next = add i64 %i, 1
+  %done = cmp_ge i64 %i_next, 10000000
+  br_cond %done, @finish, @loop
+finish:
+  %r = mod i64 %acc_next, 256
   ret i64 %r
 }

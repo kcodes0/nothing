@@ -1,4 +1,4 @@
-// expect: 20
+// expect: 128
 func @main() -> i64 {
 entry:
   br @loop
@@ -7,7 +7,7 @@ loop:
   %sum = phi i64 [0, @entry], [%sum_next, @loop]
   %sum_next = add i64 %sum, %i
   %i_next = add i64 %i, 1
-  %done = cmp_gt i64 %i_next, 1000
+  %done = cmp_gt i64 %i_next, 100000000
   br_cond %done, @finish, @loop
 finish:
   %r = mod i64 %sum_next, 256

@@ -1,9 +1,10 @@
-// expect: 111
-func @main() -> i64 {
+// expect: 234
+func @collatz_steps(i64) -> i64 {
 entry:
+  %n_init = arg i64 0
   br @loop
 loop:
-  %n = phi i64 [27, @entry], [%n_next, @update]
+  %n = phi i64 [%n_init, @entry], [%n_next, @update]
   %steps = phi i64 [0, @entry], [%steps_next, @update]
   %is_one = cmp_eq i64 %n, 1
   br_cond %is_one, @done, @check_even
@@ -24,4 +25,20 @@ update:
   br @loop
 done:
   ret i64 %steps
+}
+
+func @main() -> i64 {
+entry:
+  br @outer
+outer:
+  %i = phi i64 [1, @entry], [%i_next, @outer]
+  %total = phi i64 [0, @entry], [%total_next, @outer]
+  %s = call i64 @collatz_steps, i64 %i
+  %total_next = add i64 %total, %s
+  %i_next = add i64 %i, 1
+  %done = cmp_gt i64 %i_next, 200000
+  br_cond %done, @finish, @outer
+finish:
+  %r = mod i64 %total_next, 256
+  ret i64 %r
 }
