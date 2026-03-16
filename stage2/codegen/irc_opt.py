@@ -576,7 +576,6 @@ class IRCompiler:
         """Single pass of peephole optimizations."""
         result = []
         i = 0
-        _dbg = hasattr(self, '_peephole_debug')
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
@@ -601,6 +600,31 @@ class IRCompiler:
                     if next_line == target + ':':
                         i += 1
                         continue
+
+            # Fuse: and + cbnz/cbz -> tst + b.ne/b.eq
+            # Pattern:  "    and xD, xS, #mask"  followed by  "    cbnz/cbz xD, label"
+            #   => tst xS, #mask; b.ne/b.eq label (eliminates write to xD)
+            if stripped.startswith('and ') and i + 1 < len(lines):
+                and_parts = stripped[4:].split(',')
+                if len(and_parts) >= 3:
+                    and_dst = and_parts[0].strip()
+                    and_src = and_parts[1].strip()
+                    and_mask = ','.join(and_parts[2:]).strip()
+                    next_s = lines[i + 1].strip()
+                    if next_s.startswith('cbnz ') or next_s.startswith('cbz '):
+                        cb_parts = next_s.split(None, 1)
+                        if len(cb_parts) == 2:
+                            cb_op = cb_parts[0]  # cbnz or cbz
+                            cb_rest = cb_parts[1].split(',')
+                            if len(cb_rest) >= 2:
+                                cb_reg = cb_rest[0].strip()
+                                cb_label = ','.join(cb_rest[1:]).strip()
+                                if cb_reg == and_dst:
+                                    branch_cond = 'ne' if cb_op == 'cbnz' else 'eq'
+                                    result.append(f'    tst {and_src}, {and_mask}')
+                                    result.append(f'    b.{branch_cond} {cb_label}')
+                                    i += 2
+                                    continue
 
             # Fuse: sub/add + cmp #0 -> subs/adds (eliminate cmp)
             # Pattern:  "    sub xD, xS, #imm"  followed by  "    cmp xD, #0"
