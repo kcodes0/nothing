@@ -696,10 +696,14 @@ class IRCompiler:
             if instr.op in _REG_ONLY_OPS:
                 for op in instr.operands:
                     if is_immediate(op) and imm_val(op) != 0:
+                        v = imm_val(op)
                         # Skip mul constants that can be strength-reduced
-                        if instr.op == 'mul' and strength_reduce_mul(imm_val(op)):
+                        if instr.op == 'mul' and strength_reduce_mul(v):
                             continue
-                        _pre_needs.add(imm_val(op))
+                        # Skip div/mod by power of 2 (will use shift/and)
+                        if instr.op in ('div', 'mod') and v > 0 and (v & (v-1)) == 0:
+                            continue
+                        _pre_needs.add(v)
             elif instr.op in CMP_OPS:
                 for op in instr.operands:
                     if is_immediate(op) and not fits_12bit(abs(imm_val(op))):
@@ -1013,6 +1017,19 @@ class IRCompiler:
                 elif instr.op == 'div':
                     lhs, rhs = instr.operands
                     dst = result_reg(instr)
+                    # Strength reduce: div by power of 2 → arithmetic shift right
+                    if is_immediate(rhs):
+                        v = imm_val(rhs)
+                        if v > 0 and (v & (v - 1)) == 0:
+                            shift = int(math.log2(v))
+                            lhs_r = load_operand(lhs, SCRATCH1)
+                            if shift == 0:
+                                if dst != lhs_r:
+                                    self.output.append(f'    mov {dst}, {lhs_r}')
+                            else:
+                                self.output.append(f'    asr {dst}, {lhs_r}, #{shift}')
+                            store_result(instr.result, dst)
+                            continue
                     lhs_r = load_operand(lhs, SCRATCH1)
                     rhs_r = load_operand(rhs, SCRATCH2)
                     self.output.append(f'    sdiv {dst}, {lhs_r}, {rhs_r}')
@@ -1021,6 +1038,20 @@ class IRCompiler:
                 elif instr.op == 'mod':
                     lhs, rhs = instr.operands
                     dst = result_reg(instr)
+                    # Strength reduce: mod by power of 2 → bitwise AND
+                    if is_immediate(rhs):
+                        v = imm_val(rhs)
+                        if v > 0 and (v & (v - 1)) == 0:
+                            mask = v - 1
+                            lhs_r = load_operand(lhs, SCRATCH1)
+                            if fits_12bit(mask):
+                                self.output.append(f'    and {dst}, {lhs_r}, #{mask}')
+                            else:
+                                for l in emit_mov_imm(SCRATCH2, mask):
+                                    self.output.append(l)
+                                self.output.append(f'    and {dst}, {lhs_r}, {SCRATCH2}')
+                            store_result(instr.result, dst)
+                            continue
                     lhs_r = load_operand(lhs, SCRATCH1)
                     rhs_r = load_operand(rhs, SCRATCH2)
                     self.output.append(f'    sdiv {SCRATCH3}, {lhs_r}, {rhs_r}')
