@@ -501,7 +501,7 @@ class IRCompiler:
             intervals[v] = (start, end)
 
         # ===================================================================
-        # Phase 2: Register allocation (linear scan)
+        # Phase 2: Register allocation (linear scan) with phi coalescing
         # ===================================================================
 
         has_calls = any(i.op == 'call' for i in all_instrs)
@@ -513,6 +513,77 @@ class IRCompiler:
                 if s <= cs <= e:
                     live_across_call.add(v)
                     break
+
+        # Phi coalescing: identify self-update patterns where a phi result
+        # is updated in-place (e.g., %i_next = add %i, 1 with phi %i <- %i_next).
+        # For these, merge the intervals so they get the same register.
+        phi_prefs = {}
+        coalesced = {}  # vreg -> canonical vreg (representative)
+
+        # Find self-update phi patterns
+        for instr in all_instrs:
+            if instr.op == 'phi' and instr.result:
+                for val, label in instr.phi_args:
+                    if is_vreg(val):
+                        phi_prefs.setdefault(instr.result, set()).add(val)
+                        phi_prefs.setdefault(val, set()).add(instr.result)
+
+        # Attempt to coalesce: for each phi edge %x <- %y, check if %y is
+        # defined using %x (self-update) AND %x is not used as a source
+        # by any other phi on the same back-edge (which would need the old value).
+        #
+        # First, collect all phi groups by back-edge label
+        phi_groups = {}  # label -> [(phi_result, incoming_val)]
+        for instr in all_instrs:
+            if instr.op == 'phi' and instr.result:
+                for val, label in instr.phi_args:
+                    phi_groups.setdefault(label, []).append((instr.result, val))
+
+        for instr in all_instrs:
+            if instr.op != 'phi' or not instr.result:
+                continue
+            phi_result = instr.result
+            for val, label in instr.phi_args:
+                if not is_vreg(val) or val not in intervals or phi_result not in intervals:
+                    continue
+                # Check safety: is phi_result used as a SOURCE by another phi
+                # in the same group? If so, coalescing would destroy the value
+                # before the other phi can read it.
+                used_as_source = False
+                if label in phi_groups:
+                    for other_dst, other_src in phi_groups[label]:
+                        if other_dst != phi_result and is_vreg(other_src):
+                            # other_src == phi_result means phi_result is needed
+                            if other_src == phi_result:
+                                used_as_source = True
+                                break
+                if used_as_source:
+                    continue  # Unsafe to coalesce
+
+                # Find the instruction that defines val
+                for def_instr in all_instrs:
+                    if def_instr.result == val:
+                        # Check if def_instr uses phi_result as an operand (self-update)
+                        used = get_used_vregs(def_instr)
+                        if phi_result in used:
+                            # Self-update pattern! Merge intervals.
+                            s1, e1 = intervals[phi_result]
+                            s2, e2 = intervals[val]
+                            merged_start = min(s1, s2)
+                            merged_end = max(e1, e2)
+                            intervals[phi_result] = (merged_start, merged_end)
+                            coalesced[val] = phi_result
+                        break
+
+        # Store coalesced map for phi move filtering
+        self._coalesced = coalesced
+
+        # Remove coalesced vregs from the interval map (they'll share their canonical's register)
+        for v in coalesced:
+            if v in intervals:
+                del intervals[v]
+            if v in dead:
+                dead.discard(v)
 
         sorted_vregs = sorted(intervals.keys(), key=lambda v: intervals[v][0])
 
@@ -542,14 +613,49 @@ class IRCompiler:
             expire_old(start)
 
             reg = None
-            if v in live_across_call:
-                if avail_callee:
-                    reg = avail_callee.pop()
-            else:
-                if avail_scratch:
-                    reg = avail_scratch.pop()
-                elif avail_callee:
-                    reg = avail_callee.pop()
+
+            # Try phi coalescing: prefer the register of a phi-related vreg
+            if v in phi_prefs:
+                for partner in phi_prefs[v]:
+                    if partner in reg_assignment:
+                        preferred = reg_assignment[partner]
+                        # Check if preferred reg is available (partner's interval ended)
+                        if preferred in avail_callee:
+                            reg = preferred
+                            avail_callee.remove(reg)
+                            break
+                        elif preferred in avail_scratch:
+                            reg = preferred
+                            avail_scratch.remove(reg)
+                            break
+                        # If partner is still active but they share a phi edge,
+                        # we can still coalesce if their live ranges don't truly
+                        # overlap (one ends at the phi point where the other starts).
+                        # Check: does partner's interval end at or before our start?
+                        if partner in intervals:
+                            p_start, p_end = intervals[partner]
+                            if p_end <= start:
+                                # Partner has expired but wasn't cleaned up yet
+                                # Force expire
+                                expire_old(start)
+                                if preferred in avail_callee:
+                                    reg = preferred
+                                    avail_callee.remove(reg)
+                                    break
+                                elif preferred in avail_scratch:
+                                    reg = preferred
+                                    avail_scratch.remove(reg)
+                                    break
+
+            if reg is None:
+                if v in live_across_call:
+                    if avail_callee:
+                        reg = avail_callee.pop()
+                else:
+                    if avail_scratch:
+                        reg = avail_scratch.pop()
+                    elif avail_callee:
+                        reg = avail_callee.pop()
 
             if reg is None:
                 # Try to spill the longest-lived active
@@ -656,22 +762,29 @@ class IRCompiler:
         SCRATCH2 = 'x16'
         SCRATCH3 = 'x17'
 
+        def resolve_vreg(vreg):
+            """Resolve coalesced vregs to their canonical representative."""
+            return coalesced.get(vreg, vreg)
+
         def get_reg(vreg):
-            if vreg in reg_assignment:
-                return reg_assignment[vreg]
+            v = resolve_vreg(vreg)
+            if v in reg_assignment:
+                return reg_assignment[v]
             return None
 
         def ensure_in_reg(vreg, target_reg=SCRATCH1):
-            if vreg in reg_assignment:
-                return reg_assignment[vreg]
-            if vreg in spill_slots:
-                off = spill_base + spill_slots[vreg] * 8
+            v = resolve_vreg(vreg)
+            if v in reg_assignment:
+                return reg_assignment[v]
+            if v in spill_slots:
+                off = spill_base + spill_slots[v] * 8
                 self.output.append(f'    ldr {target_reg}, [x29, #{off}]')
                 return target_reg
-            raise RuntimeError(f"vreg {vreg} not assigned: {reg_assignment}")
+            raise RuntimeError(f"vreg {v} (from {vreg}) not assigned: {reg_assignment}")
 
         def store_result(vreg, src_reg):
-            if vreg in spill_slots:
+            v = resolve_vreg(vreg)
+            if v in spill_slots:
                 off = spill_base + spill_slots[vreg] * 8
                 self.output.append(f'    str {src_reg}, [x29, #{off}]')
 
@@ -705,8 +818,9 @@ class IRCompiler:
             const_reg_cache.clear()
 
         def result_reg(instr):
-            if instr.result in reg_assignment:
-                return reg_assignment[instr.result]
+            v = resolve_vreg(instr.result) if instr.result else None
+            if v and v in reg_assignment:
+                return reg_assignment[v]
             return SCRATCH1
 
         # Determine which cmp results are ONLY used by the immediately following br_cond
@@ -1165,7 +1279,8 @@ class IRCompiler:
             self.output.append(f'    cmp {lhs_r}, {rhs_r}')
 
     def _get_phi_move_list(self, func, src_block_name, dst_block_name):
-        """Get [(dst_vreg, src_value)] for phi nodes when branching from src to dst."""
+        """Get [(dst_vreg, src_value)] for phi nodes when branching from src to dst.
+        Filters out coalesced pairs (same register = no move needed)."""
         dst_block = func.blocks[dst_block_name]
         moves = []
         for instr in dst_block.instructions:
@@ -1173,6 +1288,12 @@ class IRCompiler:
                 break
             for val, label in instr.phi_args:
                 if label == src_block_name:
+                    # Skip if coalesced (same canonical vreg)
+                    dst_canonical = self._coalesced.get(instr.result, instr.result)
+                    if is_vreg(val):
+                        src_canonical = self._coalesced.get(val, val)
+                        if dst_canonical == src_canonical:
+                            continue  # Coalesced — no copy needed!
                     moves.append((instr.result, val))
         return moves
 
@@ -1187,22 +1308,25 @@ class IRCompiler:
         SCRATCH1 = 'x8'
         SCRATCH3 = 'x17'
 
-        # Resolve to concrete locations
+        # Resolve to concrete locations (with coalescing)
         concrete = []  # (dst_loc, src_loc, dst_vreg_name)
         for dst_vreg, src_val in moves:
+            # Resolve coalesced names
+            dst_v = self._coalesced.get(dst_vreg, dst_vreg)
             # dst location
-            if dst_vreg in reg_assignment:
-                dst_loc = reg_assignment[dst_vreg]
-            elif dst_vreg in spill_slots:
-                dst_loc = ('spill', spill_base + spill_slots[dst_vreg] * 8)
+            if dst_v in reg_assignment:
+                dst_loc = reg_assignment[dst_v]
+            elif dst_v in spill_slots:
+                dst_loc = ('spill', spill_base + spill_slots[dst_v] * 8)
             else:
                 continue
 
             # src location
             if is_vreg(src_val):
-                if src_val in reg_assignment:
-                    src_loc = reg_assignment[src_val]
-                elif src_val in spill_slots:
+                src_v = self._coalesced.get(src_val, src_val)
+                if src_v in reg_assignment:
+                    src_loc = reg_assignment[src_v]
+                elif src_v in spill_slots:
                     src_loc = ('spill', spill_base + spill_slots[src_val] * 8)
                 else:
                     continue
