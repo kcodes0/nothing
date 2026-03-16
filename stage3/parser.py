@@ -2,7 +2,7 @@
 
 from ast_nodes import (
     Type, IntType, BoolType, PtrType, VoidType,
-    Expr, IntLitExpr, BoolLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
+    Expr, IntLitExpr, BoolLitExpr, StrLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
     CallExpr, IndexExpr, CastExpr,
     Stmt, LetStmt, AssignStmt, ReturnStmt, IfStmt, WhileStmt,
     ExprStmt, BreakStmt, ContinueStmt,
@@ -424,6 +424,10 @@ class Parser:
         if tok.type == TT.FALSE:
             self.pos += 1
             return BoolLitExpr(line=tok.line, value=False)
+
+        if tok.type == TT.STRING_LIT:
+            self.pos += 1
+            return StrLitExpr(line=tok.line, value=tok.value)
 
         if tok.type == TT.IDENT:
             self.pos += 1

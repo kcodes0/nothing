@@ -6,7 +6,7 @@ Annotates each expression node with its resolved_type field.
 
 from ast_nodes import (
     Type, IntType, BoolType, PtrType, VoidType,
-    Expr, IntLitExpr, BoolLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
+    Expr, IntLitExpr, BoolLitExpr, StrLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
     CallExpr, IndexExpr, CastExpr,
     Stmt, LetStmt, AssignStmt, ReturnStmt, IfStmt, WhileStmt,
     ExprStmt, BreakStmt, ContinueStmt,
@@ -226,6 +226,9 @@ class TypeChecker:
             return expr.resolved_type
         elif isinstance(expr, BoolLitExpr):
             expr.resolved_type = BoolType()
+            return expr.resolved_type
+        elif isinstance(expr, StrLitExpr):
+            expr.resolved_type = PtrType(pointee=IntType(8))
             return expr.resolved_type
         elif isinstance(expr, IdentExpr):
             ty = self._lookup(expr.name, expr.line)

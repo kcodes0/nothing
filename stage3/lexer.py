@@ -9,6 +9,7 @@ class TT:
     # Literals
     INT_LIT = 'INT_LIT'
     CHAR_LIT = 'CHAR_LIT'
+    STRING_LIT = 'STRING_LIT'
     IDENT = 'IDENT'
 
     # Keywords
@@ -141,6 +142,11 @@ class Lexer:
             # Character literal
             if ch == "'":
                 self._read_char()
+                continue
+
+            # String literal
+            if ch == '"':
+                self._read_string()
                 continue
 
             # Identifier / keyword
@@ -303,6 +309,32 @@ class Lexer:
             raise LexError('Unterminated character literal', start_line, start_col)
         self._advance()  # skip closing '
         self.tokens.append(Token(TT.INT_LIT, str(val), start_line, start_col))
+
+    def _read_string(self):
+        start_line = self.line
+        start_col = self.col
+        self._advance()  # skip opening "
+        chars = []
+        escape_map = {'n': '\n', 't': '\t', '\\': '\\', '0': '\0', '"': '"'}
+        while self.pos < len(self.source):
+            ch = self.source[self.pos]
+            if ch == '"':
+                self._advance()  # skip closing "
+                value = ''.join(chars)
+                self.tokens.append(Token(TT.STRING_LIT, value, start_line, start_col))
+                return
+            if ch == '\\':
+                self._advance()
+                if self.pos >= len(self.source):
+                    raise LexError('Unterminated escape in string literal', start_line, start_col)
+                esc = self.source[self.pos]
+                if esc not in escape_map:
+                    raise LexError(f'Unknown escape \\{esc}', self.line, self.col)
+                chars.append(escape_map[esc])
+            else:
+                chars.append(ch)
+            self._advance()
+        raise LexError('Unterminated string literal', start_line, start_col)
 
     def _read_ident(self):
         start = self.pos

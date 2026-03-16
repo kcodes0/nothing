@@ -391,13 +391,205 @@ class IRCompiler:
         parser = IRParser(text)
         self.functions = parser.parse()
 
+    def _ir_optimize(self):
+        """IR-level optimization passes applied before codegen."""
+        for func in self.functions:
+            self._constant_fold(func)
+
+    def _constant_fold(self, func):
+        """Fold constant expressions and identities at the IR level.
+
+        - add X, 0 -> X  (and add 0, X -> X)
+        - sub X, 0 -> X
+        - mul X, 1 -> X  (and mul 1, X -> X)
+        - mul X, 0 -> 0
+        - add imm, imm -> imm  (full constant folding)
+        - sub imm, imm -> imm
+        """
+        # Build a map of vreg -> constant value for propagation
+        const_map = {}  # vreg -> str (immediate value)
+
+        changed = True
+        while changed:
+            changed = False
+            const_map.clear()
+
+            # First pass: identify constants
+            for bname in func.block_order:
+                block = func.blocks[bname]
+                for instr in block.instructions:
+                    if not instr.result:
+                        continue
+                    if instr.op in ('add', 'sub', 'mul', 'and', 'or', 'xor',
+                                     'shl', 'shr', 'div', 'mod'):
+                        lhs, rhs = instr.operands
+                        lhs_v = const_map.get(lhs, lhs) if is_vreg(lhs) else lhs
+                        rhs_v = const_map.get(rhs, rhs) if is_vreg(rhs) else rhs
+
+                        # Full constant folding: both operands are immediate
+                        if is_immediate(lhs_v) and is_immediate(rhs_v):
+                            a, b = imm_val(lhs_v), imm_val(rhs_v)
+                            result = None
+                            if instr.op == 'add': result = a + b
+                            elif instr.op == 'sub': result = a - b
+                            elif instr.op == 'mul': result = a * b
+                            elif instr.op == 'and': result = a & b
+                            elif instr.op == 'or': result = a | b
+                            elif instr.op == 'xor': result = a ^ b
+                            elif instr.op == 'shl': result = a << b
+                            elif instr.op == 'shr': result = a >> b
+                            elif instr.op == 'div' and b != 0: result = int(a / b)
+                            elif instr.op == 'mod' and b != 0: result = a % b
+                            if result is not None:
+                                const_map[instr.result] = str(result)
+                                continue
+
+                        # Identity: add X, 0 -> copy X
+                        if instr.op == 'add':
+                            if is_immediate(rhs_v) and imm_val(rhs_v) == 0:
+                                const_map[instr.result] = lhs_v if is_immediate(lhs_v) else lhs
+                                continue
+                            if is_immediate(lhs_v) and imm_val(lhs_v) == 0:
+                                const_map[instr.result] = rhs_v if is_immediate(rhs_v) else rhs
+                                continue
+
+                        # Identity: sub X, 0 -> copy X
+                        if instr.op == 'sub':
+                            if is_immediate(rhs_v) and imm_val(rhs_v) == 0:
+                                const_map[instr.result] = lhs_v if is_immediate(lhs_v) else lhs
+                                continue
+
+                        # Identity: mul X, 1 -> copy X
+                        if instr.op == 'mul':
+                            if is_immediate(rhs_v) and imm_val(rhs_v) == 1:
+                                const_map[instr.result] = lhs_v if is_immediate(lhs_v) else lhs
+                                continue
+                            if is_immediate(lhs_v) and imm_val(lhs_v) == 1:
+                                const_map[instr.result] = rhs_v if is_immediate(rhs_v) else rhs
+                                continue
+                            # mul X, 0 -> 0
+                            if (is_immediate(rhs_v) and imm_val(rhs_v) == 0) or \
+                               (is_immediate(lhs_v) and imm_val(lhs_v) == 0):
+                                const_map[instr.result] = '0'
+                                continue
+
+                    # Constant-fold comparisons
+                    if instr.op in CMP_OPS:
+                        lhs, rhs = instr.operands
+                        lhs_v = const_map.get(lhs, lhs) if is_vreg(lhs) else lhs
+                        rhs_v = const_map.get(rhs, rhs) if is_vreg(rhs) else rhs
+                        if is_immediate(lhs_v) and is_immediate(rhs_v):
+                            a, b = imm_val(lhs_v), imm_val(rhs_v)
+                            if instr.op == 'cmp_eq': result = 1 if a == b else 0
+                            elif instr.op == 'cmp_ne': result = 1 if a != b else 0
+                            elif instr.op == 'cmp_lt': result = 1 if a < b else 0
+                            elif instr.op == 'cmp_gt': result = 1 if a > b else 0
+                            elif instr.op == 'cmp_le': result = 1 if a <= b else 0
+                            elif instr.op == 'cmp_ge': result = 1 if a >= b else 0
+                            else: result = None
+                            if result is not None:
+                                const_map[instr.result] = str(result)
+                                continue
+
+            # Second pass: propagate constants into uses
+            if const_map:
+                for bname in func.block_order:
+                    block = func.blocks[bname]
+                    for instr in block.instructions:
+                        if instr.op == 'phi':
+                            new_args = []
+                            for val, label in instr.phi_args:
+                                if is_vreg(val) and val in const_map:
+                                    new_args.append((const_map[val], label))
+                                    changed = True
+                                else:
+                                    new_args.append((val, label))
+                            instr.phi_args = new_args
+                        elif instr.op == 'call':
+                            new_args = []
+                            for arg in instr.call_args:
+                                if is_vreg(arg) and arg in const_map:
+                                    new_args.append(const_map[arg])
+                                    changed = True
+                                else:
+                                    new_args.append(arg)
+                            instr.call_args = new_args
+                        elif instr.op == 'br_cond':
+                            if is_vreg(instr.operands[0]) and instr.operands[0] in const_map:
+                                instr.operands[0] = const_map[instr.operands[0]]
+                                changed = True
+                        elif instr.op == 'ret':
+                            if is_vreg(instr.operands[0]) and instr.operands[0] in const_map:
+                                instr.operands[0] = const_map[instr.operands[0]]
+                                changed = True
+                        elif instr.op == 'br':
+                            pass
+                        elif instr.op == 'arg':
+                            pass
+                        elif instr.op in ('load', 'store', 'zext', 'sext', 'trunc',
+                                          'ptrtoint', 'inttoptr'):
+                            new_ops = []
+                            for op in instr.operands:
+                                if is_vreg(op) and op in const_map:
+                                    new_ops.append(const_map[op])
+                                    changed = True
+                                else:
+                                    new_ops.append(op)
+                            instr.operands = new_ops
+                        else:
+                            # binops and cmp ops
+                            new_ops = []
+                            for op in instr.operands:
+                                if is_vreg(op) and op in const_map:
+                                    new_ops.append(const_map[op])
+                                    changed = True
+                                else:
+                                    new_ops.append(op)
+                            instr.operands = new_ops
+
     def compile(self):
         self.output = []
         self.output.append('.text')
         self.output.append('.align 4')
+        self._ir_optimize()
         for func in self.functions:
             self.compile_function(func)
+        # Peephole pass: eliminate redundant mov xA, xA
+        self.output = self._peephole_optimize(self.output)
         return '\n'.join(self.output) + '\n'
+
+    def _peephole_optimize(self, lines):
+        """Post-codegen peephole optimizations on assembly lines."""
+        result = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Eliminate: mov xA, xA (redundant self-move)
+            if stripped.startswith('mov '):
+                parts = stripped[4:].split(',')
+                if len(parts) == 2:
+                    dst = parts[0].strip()
+                    src = parts[1].strip()
+                    if dst == src:
+                        i += 1
+                        continue
+
+            # Eliminate: unconditional branch to next label (fall-through)
+            # Pattern: "    b .LABEL" followed by ".LABEL:"
+            if stripped.startswith('b ') and not stripped.startswith('b.') and \
+               not stripped.startswith('bl '):
+                target = stripped[2:].strip()
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if next_line == target + ':':
+                        i += 1
+                        continue
+
+            result.append(line)
+            i += 1
+        return result
 
     def compile_function(self, func):
         # ===================================================================
@@ -770,6 +962,9 @@ class IRCompiler:
         _REG_ONLY_OPS = {'mul', 'div', 'mod', 'and', 'or', 'xor'}
         _pre_needs = set()
         for instr in all_instrs:
+            # Skip dead instructions
+            if instr.result and instr.result in dead and instr.op not in ('call', 'load'):
+                continue
             if instr.op in _REG_ONLY_OPS:
                 for op in instr.operands:
                     if is_immediate(op) and imm_val(op) != 0:
@@ -962,6 +1157,9 @@ class IRCompiler:
         # Ops that have no immediate form — must use register for 2nd operand
         REG_ONLY_OPS = {'mul', 'div', 'mod', 'and', 'or', 'xor'}
         for instr in all_instrs:
+            # Skip dead instructions — they won't generate code
+            if instr.result and instr.result in dead and instr.op not in ('call', 'load'):
+                continue
             if instr.op in REG_ONLY_OPS:
                 for op in instr.operands:
                     if is_immediate(op):
@@ -969,6 +1167,9 @@ class IRCompiler:
                         if v != 0:  # 0 can use xzr
                             # Skip mul constants that can be strength-reduced
                             if instr.op == 'mul' and strength_reduce_mul(v):
+                                continue
+                            # Skip div/mod by power of 2 (will use shift/and)
+                            if instr.op in ('div', 'mod') and v > 0 and (v & (v-1)) == 0:
                                 continue
                             needs_preload.add(v)
             elif instr.op in CMP_OPS:
@@ -1202,7 +1403,9 @@ class IRCompiler:
                     val_r = load_operand(val_op, SCRATCH1)
                     ptr_r = load_operand(ptr_vreg, SCRATCH2)
                     if instr.ty == 'i8':
-                        self.output.append(f'    strb {val_r}, [{ptr_r}]')
+                        # strb requires a w register (32-bit view)
+                        val_w = val_r.replace('x', 'w') if val_r.startswith('x') else val_r
+                        self.output.append(f'    strb {val_w}, [{ptr_r}]')
                     else:
                         # i64, ptr, or anything else: 64-bit store
                         self.output.append(f'    str {val_r}, [{ptr_r}]')

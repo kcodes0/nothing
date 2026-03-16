@@ -1,0 +1,8 @@
+// expect: 0
+extern fn write(i64, *i8, i64) -> i64
+
+fn main() -> i64 {
+    let msg: *i8 = "Hello!\n"
+    write(1, msg, 7)
+    return 0
+}

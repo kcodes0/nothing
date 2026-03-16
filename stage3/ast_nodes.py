@@ -55,6 +55,10 @@ class BoolLitExpr(Expr):
     value: bool = False
 
 @dataclass
+class StrLitExpr(Expr):
+    value: str = ''  # the raw string content (after escape processing)
+
+@dataclass
 class IdentExpr(Expr):
     name: str = ''
 

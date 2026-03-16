@@ -11,7 +11,7 @@ Key design:
 
 from ast_nodes import (
     Type, IntType, BoolType, PtrType, VoidType,
-    Expr, IntLitExpr, BoolLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
+    Expr, IntLitExpr, BoolLitExpr, StrLitExpr, IdentExpr, BinOpExpr, UnaryOpExpr,
     CallExpr, IndexExpr, CastExpr,
     Stmt, LetStmt, AssignStmt, ReturnStmt, IfStmt, WhileStmt,
     ExprStmt, BreakStmt, ContinueStmt,
@@ -51,9 +51,27 @@ class IREmitter:
         self._block_terminated = False
         # Deferred phi patches: list of (line_index, phi_info) for while loops
         self._phi_patches = []
+        # Track whether any string literals are used (to auto-emit malloc extern)
+        self._needs_malloc = False
+        # Set of extern names already declared by the program
+        self._declared_externs = set()
 
     def emit(self, program: Program) -> str:
         self.output_lines = []
+        self._needs_malloc = False
+        self._declared_externs = set()
+
+        # Collect declared extern names
+        for decl in program.decls:
+            if isinstance(decl, ExternDecl):
+                self._declared_externs.add(decl.name)
+
+        # Pre-scan for string literals to know if we need malloc
+        self._needs_malloc = self._program_has_strings(program)
+
+        # Auto-emit malloc extern if needed and not already declared
+        if self._needs_malloc and 'malloc' not in self._declared_externs:
+            self.output_lines.append('extern @malloc(i64) -> ptr')
 
         # Emit extern declarations first
         for decl in program.decls:
@@ -66,6 +84,57 @@ class IREmitter:
                 self._emit_func(decl)
 
         return '\n'.join(self.output_lines) + '\n'
+
+    def _program_has_strings(self, program: Program) -> bool:
+        """Check if any function body contains string literals."""
+        for decl in program.decls:
+            if isinstance(decl, FuncDecl):
+                if self._stmts_have_strings(decl.body):
+                    return True
+        return False
+
+    def _stmts_have_strings(self, stmts) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, LetStmt):
+                if self._expr_has_strings(stmt.init):
+                    return True
+            elif isinstance(stmt, AssignStmt):
+                if self._expr_has_strings(stmt.value):
+                    return True
+            elif isinstance(stmt, ReturnStmt):
+                if stmt.value and self._expr_has_strings(stmt.value):
+                    return True
+            elif isinstance(stmt, ExprStmt):
+                if self._expr_has_strings(stmt.expr):
+                    return True
+            elif isinstance(stmt, IfStmt):
+                if self._expr_has_strings(stmt.condition):
+                    return True
+                if self._stmts_have_strings(stmt.then_body):
+                    return True
+                if self._stmts_have_strings(stmt.else_body):
+                    return True
+            elif isinstance(stmt, WhileStmt):
+                if self._expr_has_strings(stmt.condition):
+                    return True
+                if self._stmts_have_strings(stmt.body):
+                    return True
+        return False
+
+    def _expr_has_strings(self, expr) -> bool:
+        if isinstance(expr, StrLitExpr):
+            return True
+        if isinstance(expr, BinOpExpr):
+            return self._expr_has_strings(expr.left) or self._expr_has_strings(expr.right)
+        if isinstance(expr, UnaryOpExpr):
+            return self._expr_has_strings(expr.operand)
+        if isinstance(expr, CallExpr):
+            return any(self._expr_has_strings(a) for a in expr.args)
+        if isinstance(expr, CastExpr):
+            return self._expr_has_strings(expr.expr)
+        if isinstance(expr, IndexExpr):
+            return self._expr_has_strings(expr.base) or self._expr_has_strings(expr.index)
+        return False
 
     def _emit_extern(self, decl: ExternDecl):
         param_types = ', '.join(ir_type(t) for t in decl.param_types)
@@ -424,6 +493,8 @@ class IREmitter:
             return str(expr.value)
         elif isinstance(expr, BoolLitExpr):
             return '1' if expr.value else '0'
+        elif isinstance(expr, StrLitExpr):
+            return self._emit_string_literal(expr.value)
         elif isinstance(expr, IdentExpr):
             return self.current_defs.get(expr.name, f'%{expr.name}')
         elif isinstance(expr, BinOpExpr):
@@ -585,6 +656,29 @@ class IREmitter:
         result = self._new_vreg('idx')
         self._emit(f'  {result} = load {load_ty} {addr}')
         return result
+
+    # ----- String literals -----
+
+    def _emit_string_literal(self, text: str) -> str:
+        """Emit code to create a string constant in memory via malloc + byte stores."""
+        # Encode to bytes with null terminator
+        raw_bytes = text.encode('utf-8') + b'\0'
+        length = len(raw_bytes)
+
+        # Allocate buffer
+        buf = self._new_vreg('str')
+        self._emit(f'  {buf} = call ptr @malloc, i64 {length}')
+
+        # Store each byte
+        for i, byte_val in enumerate(raw_bytes):
+            if i == 0:
+                self._emit(f'  store i8 {byte_val}, ptr {buf}')
+            else:
+                addr = self._new_vreg('sp')
+                self._emit(f'  {addr} = add ptr {buf}, {i}')
+                self._emit(f'  store i8 {byte_val}, ptr {addr}')
+
+        return buf
 
     # ----- Helpers -----
 
