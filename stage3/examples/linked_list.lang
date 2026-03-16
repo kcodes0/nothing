@@ -1,0 +1,39 @@
+// expect: 55
+// Linked list: push 1-10, sum all values
+extern fn malloc(i64) -> *i8
+extern fn free(*i8)
+
+fn main() -> i64 {
+    // Build linked list with values 1-10
+    // Each node: 16 bytes (value at offset 0, next ptr at offset 8)
+    let head: i64 = 0
+    let i: i64 = 1
+    while i <= 10 {
+        let buf: *i8 = malloc(16)
+        let n: i64 = buf as i64
+        let vp: *i64 = n as *i64
+        *vp = i
+        let np: *i64 = (n + 8) as *i64
+        *np = head
+        head = n
+        i = i + 1
+    }
+    // Sum all values by traversing the list
+    let sum: i64 = 0
+    let cur: i64 = head
+    while cur != 0 {
+        let vp: *i64 = cur as *i64
+        sum = sum + *vp
+        let np: *i64 = (cur + 8) as *i64
+        cur = *np
+    }
+    // Free all nodes
+    cur = head
+    while cur != 0 {
+        let np: *i64 = (cur + 8) as *i64
+        let next: i64 = *np
+        free(cur as *i8)
+        cur = next
+    }
+    return sum
+}
