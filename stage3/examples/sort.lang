@@ -1,0 +1,60 @@
+// expect: 1
+// Bubble sort an array of 20 integers, verify it's sorted
+extern fn malloc(i64) -> *i8
+extern fn free(*i8)
+
+fn get(arr: *i64, i: i64) -> i64 {
+    let p: *i64 = (arr as i64 + i * 8) as *i64
+    return *p
+}
+
+fn set(arr: *i64, i: i64, val: i64) -> i64 {
+    let p: *i64 = (arr as i64 + i * 8) as *i64
+    *p = val
+    return 0
+}
+
+fn bubble_sort(arr: *i64, n: i64) -> i64 {
+    let i: i64 = 0
+    while i < n - 1 {
+        let j: i64 = 0
+        while j < n - 1 - i {
+            let a: i64 = get(arr, j)
+            let b: i64 = get(arr, j + 1)
+            if a > b {
+                set(arr, j, b)
+                set(arr, j + 1, a)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn is_sorted(arr: *i64, n: i64) -> i64 {
+    let i: i64 = 0
+    while i < n - 1 {
+        if get(arr, i) > get(arr, i + 1) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn main() -> i64 {
+    let n: i64 = 20
+    let buf: *i8 = malloc(n * 8)
+    let arr: *i64 = buf as *i64
+    // Fill with descending values (worst case for bubble sort)
+    let i: i64 = 0
+    while i < n {
+        set(arr, i, n - i)
+        i = i + 1
+    }
+    bubble_sort(arr, n)
+    let result: i64 = is_sorted(arr, n)
+    free(buf)
+    return result
+}

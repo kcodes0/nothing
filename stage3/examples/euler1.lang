@@ -1,4 +1,5 @@
 // expect: 208
+// Project Euler #1: sum of multiples of 3 or 5 below 1000
 fn main() -> i64 {
     let sum: i64 = 0
     let i: i64 = 1
