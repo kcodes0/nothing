@@ -62,18 +62,29 @@ class IRParser:
     def __init__(self, text):
         self.text = text
         self.functions = []
+        self.externs = []  # list of extern function names (for reference)
 
     def parse(self):
         lines = self.text.split('\n')
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            if line.startswith('func '):
+            if line.startswith('extern '):
+                self._parse_extern(line)
+                i += 1
+            elif line.startswith('func '):
                 func, i = self._parse_function(lines, i)
                 self.functions.append(func)
             else:
                 i += 1
         return self.functions
+
+    def _parse_extern(self, line):
+        """Parse extern declaration like: extern @write(i64, ptr, i64) -> i64"""
+        m = re.match(r'extern\s+@(\w+)\(([^)]*)\)(?:\s*->\s*(\w+))?', line)
+        assert m, f"Bad extern declaration: {line}"
+        name = m.group(1)
+        self.externs.append(name)
 
     def _parse_function(self, lines, start):
         header = lines[start].strip()
@@ -146,6 +157,12 @@ class IRParser:
             return self._parse_ret(rest)
         elif op == 'arg':
             return self._parse_arg(result, rest)
+        elif op == 'load':
+            return self._parse_load(result, rest)
+        elif op == 'store':
+            return self._parse_store(rest)
+        elif op in ('zext', 'sext', 'trunc', 'ptrtoint', 'inttoptr'):
+            return self._parse_cast(result, op, rest)
         else:
             return self._parse_binop(result, op, rest)
 
@@ -199,6 +216,32 @@ class IRParser:
         assert m, f"Bad arg: {rest}"
         return Instruction(result=result, op='arg', ty=m.group(1), operands=[m.group(2)])
 
+
+    def _parse_load(self, result, rest):
+        """Parse: load type %ptr"""
+        m = re.match(r'load\s+(\w+)\s+(%\w+)', rest)
+        assert m, f"Bad load: {rest}"
+        ty = m.group(1)
+        ptr = m.group(2)
+        return Instruction(result=result, op='load', ty=ty, operands=[ptr])
+
+    def _parse_store(self, rest):
+        """Parse: store type %val, ptr %ptr"""
+        m = re.match(r'store\s+(\w+)\s+([^,]+),\s*(\w+)\s+(%\w+)', rest)
+        assert m, f"Bad store: {rest}"
+        val_ty = m.group(1)
+        val = m.group(2).strip()
+        # ptr_ty = m.group(3)  # e.g. 'ptr' — not needed for codegen
+        ptr = m.group(4)
+        return Instruction(result=None, op='store', ty=val_ty, operands=[val, ptr])
+
+    def _parse_cast(self, result, op, rest):
+        """Parse: zext/sext/trunc/ptrtoint/inttoptr type %val"""
+        m = re.match(r'\w+\s+(\w+)\s+(%\w+)', rest)
+        assert m, f"Bad {op}: {rest}"
+        ty = m.group(1)
+        val = m.group(2)
+        return Instruction(result=result, op=op, ty=ty, operands=[val])
 
     def _parse_binop(self, result, op, rest):
         m = re.match(r'\w+\s+(\w+)\s+(.+),\s*(.+)', rest)
@@ -315,6 +358,19 @@ def get_used_vregs(instr):
             used.add(instr.operands[0])
     elif instr.op in ('br', 'arg'):
         pass
+    elif instr.op == 'load':
+        # load uses the pointer operand
+        if is_vreg(instr.operands[0]):
+            used.add(instr.operands[0])
+    elif instr.op == 'store':
+        # store uses both the value and the pointer
+        for op in instr.operands:
+            if is_vreg(op):
+                used.add(op)
+    elif instr.op in ('zext', 'sext', 'trunc', 'ptrtoint', 'inttoptr'):
+        # cast ops use their single operand
+        if is_vreg(instr.operands[0]):
+            used.add(instr.operands[0])
     else:
         for op in instr.operands:
             if is_vreg(op):
@@ -962,7 +1018,7 @@ class IRCompiler:
 
             for instr in block.instructions:
                 # Skip dead instructions
-                if instr.result and instr.result in dead and instr.op != 'call':
+                if instr.result and instr.result in dead and instr.op not in ('call', 'load'):
                     continue
 
                 if instr.op == 'phi':
@@ -1127,6 +1183,57 @@ class IRCompiler:
                     cond = CMP_OPS[instr.op]
                     self._emit_cmp(lhs, rhs, load_operand)
                     self.output.append(f'    cset {dst}, {cond}')
+                    store_result(instr.result, dst)
+
+                elif instr.op == 'load':
+                    ptr_vreg = instr.operands[0]
+                    dst = result_reg(instr)
+                    ptr_r = load_operand(ptr_vreg, SCRATCH1)
+                    if instr.ty == 'i8':
+                        self.output.append(f'    ldrb {dst}, [{ptr_r}]')
+                    else:
+                        # i64, ptr, or anything else: 64-bit load
+                        self.output.append(f'    ldr {dst}, [{ptr_r}]')
+                    store_result(instr.result, dst)
+
+                elif instr.op == 'store':
+                    val_op = instr.operands[0]
+                    ptr_vreg = instr.operands[1]
+                    val_r = load_operand(val_op, SCRATCH1)
+                    ptr_r = load_operand(ptr_vreg, SCRATCH2)
+                    if instr.ty == 'i8':
+                        self.output.append(f'    strb {val_r}, [{ptr_r}]')
+                    else:
+                        # i64, ptr, or anything else: 64-bit store
+                        self.output.append(f'    str {val_r}, [{ptr_r}]')
+
+                elif instr.op == 'zext':
+                    src_vreg = instr.operands[0]
+                    dst = result_reg(instr)
+                    src_r = load_operand(src_vreg, SCRATCH1)
+                    self.output.append(f'    and {dst}, {src_r}, #0xFF')
+                    store_result(instr.result, dst)
+
+                elif instr.op == 'sext':
+                    src_vreg = instr.operands[0]
+                    dst = result_reg(instr)
+                    src_r = load_operand(src_vreg, SCRATCH1)
+                    self.output.append(f'    sxtb {dst}, {src_r}')
+                    store_result(instr.result, dst)
+
+                elif instr.op == 'trunc':
+                    src_vreg = instr.operands[0]
+                    dst = result_reg(instr)
+                    src_r = load_operand(src_vreg, SCRATCH1)
+                    self.output.append(f'    and {dst}, {src_r}, #0xFF')
+                    store_result(instr.result, dst)
+
+                elif instr.op in ('ptrtoint', 'inttoptr'):
+                    src_vreg = instr.operands[0]
+                    dst = result_reg(instr)
+                    src_r = load_operand(src_vreg, SCRATCH1)
+                    if dst != src_r:
+                        self.output.append(f'    mov {dst}, {src_r}')
                     store_result(instr.result, dst)
 
                 elif instr.op == 'br':

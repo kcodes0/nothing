@@ -1,0 +1,19 @@
+// expect: 44
+extern @malloc(i64) -> ptr
+extern @free(ptr)
+
+func @main() -> i64 {
+entry:
+  %buf = call ptr @malloc, i64 64
+  %p = inttoptr ptr %buf
+  store i64 100, ptr %p
+  %offset = add i64 8, 0
+  %p2 = add ptr %p, %offset
+  store i64 200, ptr %p2
+  %v1 = load i64 %p
+  %v2 = load i64 %p2
+  %sum = add i64 %v1, %v2
+  %r = mod i64 %sum, 256
+  call i64 @free, ptr %buf
+  ret i64 %r
+}
