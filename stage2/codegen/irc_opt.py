@@ -543,9 +543,15 @@ class IRCompiler:
             if instr.op != 'phi' or not instr.result:
                 continue
             phi_result = instr.result
+            if phi_result in coalesced or phi_result not in intervals:
+                continue
             for val, label in instr.phi_args:
-                if not is_vreg(val) or val not in intervals or phi_result not in intervals:
+                if not is_vreg(val) or val not in intervals:
                     continue
+                # Skip if val already coalesced
+                if val in coalesced:
+                    continue
+
                 # Check safety: is phi_result used as a SOURCE by another phi
                 # in the same group? If so, coalescing would destroy the value
                 # before the other phi can read it.
@@ -553,27 +559,42 @@ class IRCompiler:
                 if label in phi_groups:
                     for other_dst, other_src in phi_groups[label]:
                         if other_dst != phi_result and is_vreg(other_src):
-                            # other_src == phi_result means phi_result is needed
                             if other_src == phi_result:
                                 used_as_source = True
                                 break
                 if used_as_source:
                     continue  # Unsafe to coalesce
 
-                # Find the instruction that defines val
+                # Try two coalescing strategies:
+                # 1. Self-update: val is defined using phi_result (strongest)
+                # 2. Non-overlapping: val's live range ends before phi_result starts
+                can_coalesce = False
+
+                # Strategy 1: Self-update pattern
                 for def_instr in all_instrs:
                     if def_instr.result == val:
-                        # Check if def_instr uses phi_result as an operand (self-update)
                         used = get_used_vregs(def_instr)
                         if phi_result in used:
-                            # Self-update pattern! Merge intervals.
-                            s1, e1 = intervals[phi_result]
-                            s2, e2 = intervals[val]
-                            merged_start = min(s1, s2)
-                            merged_end = max(e1, e2)
-                            intervals[phi_result] = (merged_start, merged_end)
-                            coalesced[val] = phi_result
+                            can_coalesce = True
                         break
+
+                # Strategy 2: Non-overlapping live ranges
+                # val is only live from its def to the phi point (end of predecessor block)
+                # phi_result is live from the phi point onward
+                # If they don't truly interfere, coalesce.
+                if not can_coalesce:
+                    s1, e1 = intervals[phi_result]
+                    s2, e2 = intervals[val]
+                    # val's last use should be at or before phi_result's definition
+                    # (the phi node is at the start of phi_result's block)
+                    if e2 <= s1 or s2 >= e1:
+                        can_coalesce = True
+
+                if can_coalesce:
+                    s1, e1 = intervals[phi_result]
+                    s2, e2 = intervals[val]
+                    intervals[phi_result] = (min(s1, s2), max(e1, e2))
+                    coalesced[val] = phi_result
 
         # Store coalesced map for phi move filtering
         self._coalesced = coalesced
