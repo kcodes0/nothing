@@ -1,0 +1,4 @@
+// expect: 42
+fn main() -> i64 {
+    return 42
+}

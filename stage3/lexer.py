@@ -208,9 +208,9 @@ class Lexer:
             }
             if ch in single_map:
                 tt = single_map[ch]
-                if ch in ('(', '[', '{'):
+                if ch in ('(', '['):
                     self.nesting += 1
-                elif ch in (')', ']', '}'):
+                elif ch in (')', ']'):
                     self.nesting = max(0, self.nesting - 1)
                 self.tokens.append(Token(tt, ch, self.line, self.col))
                 self._advance()
