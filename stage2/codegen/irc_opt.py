@@ -1391,7 +1391,9 @@ class IRCompiler:
                     dst = result_reg(instr)
                     ptr_r = load_operand(ptr_vreg, SCRATCH1)
                     if instr.ty == 'i8':
-                        self.output.append(f'    ldrb {dst}, [{ptr_r}]')
+                        # ldrb requires w register; zero-extends into full x register
+                        dst_w = dst.replace('x', 'w') if dst.startswith('x') else dst
+                        self.output.append(f'    ldrb {dst_w}, [{ptr_r}]')
                     else:
                         # i64, ptr, or anything else: 64-bit load
                         self.output.append(f'    ldr {dst}, [{ptr_r}]')
