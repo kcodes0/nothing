@@ -703,6 +703,58 @@ class IRCompiler:
             if did_redirect:
                 continue
 
+            # Copy propagation: "mov xT, xS" followed by an instruction that
+            # uses xT as a source => substitute xS for xT and remove the mov.
+            # Pattern: mov x13, x10; and x0, x13, #255 => and x0, x10, #255
+            # Only safe when xT is not used again after the next instruction.
+            if stripped.startswith('mov ') and i + 1 < len(lines):
+                mov_parts = stripped[4:].split(',')
+                if len(mov_parts) == 2:
+                    cp_dst = mov_parts[0].strip()  # x13
+                    cp_src = mov_parts[1].strip()  # x10
+                    if cp_dst.startswith('x') and cp_src.startswith('x') and cp_dst != cp_src:
+                        next_raw = lines[i + 1]
+                        next_s = next_raw.strip()
+                        # Only propagate into arithmetic/logic instructions, not branches/memory
+                        if not next_s.startswith(('b ', 'b.', 'bl ', 'cb', 'tb', 'ret',
+                                                  'stp', 'ldp', 'str ', 'ldr ', '.')) \
+                                and next_s and next_raw[0:1].isspace():
+                            # Check if cp_dst is used as a SOURCE (not dest) in next instruction
+                            next_parts = next_s.split(',')
+                            if len(next_parts) >= 2:
+                                next_dst = next_parts[0].split()[-1].strip()  # dest register
+                                # Collect source tokens (everything after the dest)
+                                source_part = ','.join(next_parts[1:])
+                                src_regs = set()
+                                for tok in source_part.replace(',', ' ').replace('[', ' ').replace(']', ' ').split():
+                                    if tok.startswith('x') or tok.startswith('w'):
+                                        src_regs.add(tok)
+                                if cp_dst in src_regs and cp_dst != next_dst and cp_src != next_dst:
+                                    # Verify cp_dst is NOT used in any subsequent line
+                                    # (within this basic block, up to label/branch/end)
+                                    cp_dst_used_later = False
+                                    for k in range(i + 2, len(lines)):
+                                        later = lines[k].strip()
+                                        if not later or (not lines[k][0:1].isspace() and later):
+                                            break  # hit a label or end
+                                        if later.startswith(('b ', 'b.', 'bl ', 'cb', 'tb', 'ret')):
+                                            # Check if branch uses cp_dst
+                                            if cp_dst in later:
+                                                cp_dst_used_later = True
+                                            break  # end of block
+                                        if cp_dst in later.replace(',', ' ').replace('[', ' ').replace(']', ' ').split():
+                                            cp_dst_used_later = True
+                                            break
+                                    if not cp_dst_used_later:
+                                        # cp_dst is used as source in next instruction
+                                        # Replace cp_dst with cp_src in the source part
+                                        new_source = source_part.replace(cp_dst, cp_src)
+                                        new_next = f'    {next_parts[0].split()[0]} {next_dst},{new_source}'
+                                        # Skip the mov, emit the rewritten instruction
+                                        result.append(new_next)
+                                        i += 2
+                                        continue
+
             result.append(line)
             i += 1
         return result
