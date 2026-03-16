@@ -1,0 +1,10 @@
+// expect: 1
+fn main() -> i64 {
+    let result: i64 = 1
+    let i: i64 = 0
+    while i < 100000000 {
+        result = result * 3
+        i = i + 1
+    }
+    return result % 256
+}
