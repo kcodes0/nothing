@@ -559,9 +559,24 @@ class IRCompiler:
         return '\n'.join(self.output) + '\n'
 
     def _peephole_optimize(self, lines):
-        """Post-codegen peephole optimizations on assembly lines."""
+        """Post-codegen peephole optimizations on assembly lines.
+
+        Runs multiple passes until no more changes are made.
+        """
+        changed = True
+        while changed:
+            changed = False
+            new_lines = self._peephole_pass(lines)
+            if len(new_lines) != len(lines):
+                changed = True
+            lines = new_lines
+        return lines
+
+    def _peephole_pass(self, lines):
+        """Single pass of peephole optimizations."""
         result = []
         i = 0
+        _dbg = hasattr(self, '_peephole_debug')
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
@@ -586,6 +601,65 @@ class IRCompiler:
                     if next_line == target + ':':
                         i += 1
                         continue
+
+            # Fuse: sub/add + cmp #0 -> subs/adds (eliminate cmp)
+            # Pattern:  "    sub xD, xS, #imm"  followed by  "    cmp xD, #0"
+            #   => replace sub with subs, remove cmp
+            if stripped.startswith(('sub ', 'add ')) and not stripped.startswith(('subs ', 'adds ')):
+                op = stripped[:3].strip()
+                rest = stripped[len(op):].strip()
+                parts = [p.strip() for p in rest.split(',')]
+                if len(parts) >= 2 and i + 1 < len(lines):
+                    dst_reg = parts[0]
+                    next_stripped = lines[i + 1].strip()
+                    if next_stripped == f'cmp {dst_reg}, #0':
+                        # Replace sub/add with subs/adds, skip the cmp
+                        result.append(f'    {op}s {rest}')
+                        i += 2  # skip both the sub/add and the cmp
+                        continue
+
+            # Fold: "op xD, xS, ..." followed by "mov xT, xD" where xD is not
+            # also a source operand => change op's destination to xT and remove mov.
+            # This handles phi copy residues like: asr x12, x9, #1; mov x9, x12
+            # ARM64 instructions read all sources before writing, so xT can equal
+            # a source register safely.
+            did_redirect = False
+            if i + 1 < len(lines):
+                next_stripped = lines[i + 1].strip()
+                if next_stripped.startswith('mov '):
+                    mov_parts = next_stripped[4:].split(',')
+                    if len(mov_parts) == 2:
+                        mov_dst = mov_parts[0].strip()
+                        mov_src = mov_parts[1].strip()
+                        # Check if current line produces mov_src as its destination
+                        # Only handle simple cases: result of arithmetic/shift ops
+                        for prefix in ('asr ', 'lsl ', 'lsr ', 'add ', 'sub ',
+                                       'mul ', 'and ', 'orr ', 'eor ', 'sdiv ',
+                                       'movz ', 'movn '):
+                            if stripped.startswith(prefix):
+                                instr_parts = stripped[len(prefix):].split(',')
+                                if len(instr_parts) >= 2:
+                                    instr_dst = instr_parts[0].strip()
+                                    if instr_dst == mov_src and instr_dst != mov_dst:
+                                        # Check mov_src is not also a source operand.
+                                        # If it is, the instruction reads and writes the
+                                        # same register (like add x12, x12, #1), meaning
+                                        # it's an in-place update that may be needed later.
+                                        # Parse source operands properly (strip commas/spaces).
+                                        src_tokens = set()
+                                        for part in instr_parts[1:]:
+                                            token = part.strip().rstrip(',').lstrip(',')
+                                            src_tokens.add(token)
+                                        if mov_src not in src_tokens:
+                                            # Safe: mov_src is a fresh destination not read
+                                            # by this instruction. Redirect output to mov_dst.
+                                            new_instr = f'    {prefix}{mov_dst},{",".join(instr_parts[1:])}'
+                                            result.append(new_instr)
+                                            i += 2
+                                            did_redirect = True
+                                break
+            if did_redirect:
+                continue
 
             result.append(line)
             i += 1
