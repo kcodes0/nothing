@@ -101,7 +101,7 @@ class LetStmt(Stmt):
 
 @dataclass
 class AssignStmt(Stmt):
-    target: str = ''
+    target: 'Expr' = None  # IdentExpr, UnaryOpExpr('*', ...), or IndexExpr
     value: Optional[Expr] = None
 
 @dataclass

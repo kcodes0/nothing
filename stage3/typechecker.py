@@ -121,18 +121,58 @@ class TypeChecker:
         self._define(stmt.name, declared, stmt.line)
 
     def _check_assign(self, stmt: AssignStmt):
-        var_type = self._lookup(stmt.target, stmt.line)
+        target = stmt.target
         val_type = self._check_expr(stmt.value)
-        if not types_equal(var_type, val_type):
-            if isinstance(val_type, BoolType) and isinstance(var_type, IntType):
-                pass
-            elif isinstance(val_type, IntType) and isinstance(var_type, IntType):
-                pass
-            else:
-                raise TypeError_(
-                    f'Cannot assign {type_name(val_type)} to variable of type {type_name(var_type)}',
-                    stmt.line,
-                )
+
+        if isinstance(target, IdentExpr):
+            # Simple variable assignment: ident = expr
+            var_type = self._lookup(target.name, stmt.line)
+            target.resolved_type = var_type
+            if not types_equal(var_type, val_type):
+                if isinstance(val_type, BoolType) and isinstance(var_type, IntType):
+                    pass
+                elif isinstance(val_type, IntType) and isinstance(var_type, IntType):
+                    pass
+                else:
+                    raise TypeError_(
+                        f'Cannot assign {type_name(val_type)} to variable of type {type_name(var_type)}',
+                        stmt.line,
+                    )
+        elif isinstance(target, UnaryOpExpr) and target.op == '*':
+            # Pointer dereference store: *ptr = value
+            ptr_type = self._check_expr(target.operand)
+            if not isinstance(ptr_type, PtrType):
+                raise TypeError_(f'Cannot dereference non-pointer', stmt.line)
+            pointee_type = ptr_type.pointee or IntType(8)
+            target.resolved_type = pointee_type
+            if not types_equal(pointee_type, val_type):
+                if isinstance(val_type, IntType) and isinstance(pointee_type, IntType):
+                    pass
+                else:
+                    raise TypeError_(
+                        f'Cannot store {type_name(val_type)} through pointer to {type_name(pointee_type)}',
+                        stmt.line,
+                    )
+        elif isinstance(target, IndexExpr):
+            # Indexed store: arr[i] = value
+            base_type = self._check_expr(target.base)
+            idx_type = self._check_expr(target.index)
+            if not isinstance(base_type, PtrType):
+                raise TypeError_(f'Cannot index non-pointer type {type_name(base_type)}', stmt.line)
+            if not isinstance(idx_type, (IntType, BoolType)):
+                raise TypeError_(f'Index must be integer, got {type_name(idx_type)}', stmt.line)
+            pointee_type = base_type.pointee or IntType(8)
+            target.resolved_type = pointee_type
+            if not types_equal(pointee_type, val_type):
+                if isinstance(val_type, IntType) and isinstance(pointee_type, IntType):
+                    pass
+                else:
+                    raise TypeError_(
+                        f'Cannot store {type_name(val_type)} through pointer to {type_name(pointee_type)}',
+                        stmt.line,
+                    )
+        else:
+            raise TypeError_('Invalid assignment target', stmt.line)
 
     def _check_return(self, stmt: ReturnStmt):
         if stmt.value is None:

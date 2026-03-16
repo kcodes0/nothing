@@ -1,0 +1,16 @@
+// expect: 44
+extern fn malloc(i64) -> *i8
+extern fn free(*i8)
+
+fn main() -> i64 {
+    let buf: *i8 = malloc(64)
+    let p: *i64 = buf as *i64
+    *p = 100
+    let p2: *i64 = (p as i64 + 8) as *i64
+    *p2 = 200
+    let v1: i64 = *p
+    let v2: i64 = *p2
+    let result: i64 = v1 + v2
+    free(buf)
+    return result % 256
+}

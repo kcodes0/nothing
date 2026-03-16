@@ -165,8 +165,33 @@ class IREmitter:
         self.var_types[stmt.name] = ity
 
     def _emit_assign(self, stmt: AssignStmt):
+        target = stmt.target
         vreg = self._emit_expr(stmt.value)
-        self.current_defs[stmt.target] = vreg
+
+        if isinstance(target, IdentExpr):
+            # Simple variable assignment
+            self.current_defs[target.name] = vreg
+        elif isinstance(target, UnaryOpExpr) and target.op == '*':
+            # Pointer dereference store: *ptr = value
+            ptr_vreg = self._emit_expr(target.operand)
+            val_ty = self._expr_ir_type(stmt.value)
+            self._emit(f'  store {val_ty} {vreg}, ptr {ptr_vreg}')
+        elif isinstance(target, IndexExpr):
+            # Indexed store: arr[i] = value
+            base_vreg = self._emit_expr(target.base)
+            idx_vreg = self._emit_expr(target.index)
+            val_ty = self._expr_ir_type(stmt.value)
+            # Compute element size from pointee type
+            pointee_ty = target.resolved_type
+            if isinstance(pointee_ty, IntType):
+                elem_size = pointee_ty.bits // 8
+            else:
+                elem_size = 8  # pointer size
+            offset = self._new_vreg('offset')
+            self._emit(f'  {offset} = mul i64 {idx_vreg}, {elem_size}')
+            addr = self._new_vreg('addr')
+            self._emit(f'  {addr} = add ptr {base_vreg}, {offset}')
+            self._emit(f'  store {val_ty} {vreg}, ptr {addr}')
 
     def _emit_return(self, stmt: ReturnStmt):
         if stmt.value is not None:
@@ -375,7 +400,10 @@ class IREmitter:
         assigned = set()
         for stmt in stmts:
             if isinstance(stmt, AssignStmt):
-                assigned.add(stmt.target)
+                target = stmt.target
+                if isinstance(target, IdentExpr):
+                    assigned.add(target.name)
+                # Deref/index stores don't create SSA variable assignments
             elif isinstance(stmt, IfStmt):
                 assigned |= self._scan_assigned_vars(stmt.then_body)
                 assigned |= self._scan_assigned_vars(stmt.else_body)
@@ -407,8 +435,7 @@ class IREmitter:
         elif isinstance(expr, CastExpr):
             return self._emit_expr(expr.expr)
         elif isinstance(expr, IndexExpr):
-            # Not needed for current tests
-            return self._emit_expr(expr.base)
+            return self._emit_index(expr)
         return '0'
 
     def _emit_binop(self, expr: BinOpExpr) -> str:
@@ -516,6 +543,12 @@ class IREmitter:
             result = self._new_vreg('bnot')
             self._emit(f'  {result} = xor {ity} {operand}, {all_ones}')
             return result
+        elif expr.op == '*':
+            # Pointer dereference (load)
+            load_ty = ir_type(expr.resolved_type) if expr.resolved_type else 'i64'
+            result = self._new_vreg('deref')
+            self._emit(f'  {result} = load {load_ty} {operand}')
+            return result
         return operand
 
     def _emit_call(self, expr: CallExpr) -> str:
@@ -532,6 +565,25 @@ class IREmitter:
             self._emit(f'  {result} = call {ret_ty} @{expr.func_name}, {args_part}')
         else:
             self._emit(f'  {result} = call {ret_ty} @{expr.func_name}')
+        return result
+
+    def _emit_index(self, expr: IndexExpr) -> str:
+        """Emit IR for arr[i] — pointer arithmetic + load."""
+        base_vreg = self._emit_expr(expr.base)
+        idx_vreg = self._emit_expr(expr.index)
+        # Compute element size from the resolved pointee type
+        load_ty = ir_type(expr.resolved_type) if expr.resolved_type else 'i64'
+        pointee_ty = expr.resolved_type
+        if isinstance(pointee_ty, IntType):
+            elem_size = pointee_ty.bits // 8
+        else:
+            elem_size = 8  # pointer size
+        offset = self._new_vreg('offset')
+        self._emit(f'  {offset} = mul i64 {idx_vreg}, {elem_size}')
+        addr = self._new_vreg('addr')
+        self._emit(f'  {addr} = add ptr {base_vreg}, {offset}')
+        result = self._new_vreg('idx')
+        self._emit(f'  {result} = load {load_ty} {addr}')
         return result
 
     # ----- Helpers -----

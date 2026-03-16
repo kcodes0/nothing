@@ -240,18 +240,23 @@ class Parser:
         return WhileStmt(line=tok.line, condition=cond, body=body)
 
     def _parse_assign_or_expr_stmt(self):
-        tok = self._cur()
-        # Check if this is `ident = expr`
-        if tok.type == TT.IDENT and self._peek(1).type == TT.ASSIGN:
-            name_tok = self._eat(TT.IDENT)
-            self._eat(TT.ASSIGN)
-            expr = self._parse_expr()
-            self._expect_newline_or_eof()
-            return AssignStmt(line=tok.line, target=name_tok.value, value=expr)
-        # Expression statement
+        # Parse LHS as expression first
         expr = self._parse_expr()
+        if self._at(TT.ASSIGN):
+            self._eat(TT.ASSIGN)
+            value = self._parse_expr()
+            self._expect_newline_or_eof()
+            # Convert expr to an assignment target
+            if isinstance(expr, IdentExpr):
+                return AssignStmt(line=expr.line, target=expr, value=value)
+            elif isinstance(expr, UnaryOpExpr) and expr.op == '*':
+                return AssignStmt(line=expr.line, target=expr, value=value)
+            elif isinstance(expr, IndexExpr):
+                return AssignStmt(line=expr.line, target=expr, value=value)
+            else:
+                raise ParseError('Invalid assignment target', self._cur())
         self._expect_newline_or_eof()
-        return ExprStmt(line=tok.line, expr=expr)
+        return ExprStmt(line=expr.line, expr=expr)
 
     # ----- expression parsing with precedence -----
 

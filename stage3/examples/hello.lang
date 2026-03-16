@@ -1,0 +1,51 @@
+// expect: 0
+// Prints numbers using write() syscall
+extern fn write(fd: i64, buf: *i8, len: i64) -> i64
+extern fn malloc(size: i64) -> *i8
+extern fn free(ptr: *i8)
+extern fn exit(code: i64)
+
+fn print_num(n: i64) -> i64 {
+    let buf: *i8 = malloc(24)
+    let neg: i64 = 0
+    if n < 0 {
+        neg = 1
+        n = 0 - n
+    }
+    let pos: i64 = 23
+    let p: *i8 = buf
+    // Write newline at end
+    let end_ptr: *i8 = (p as i64 + pos) as *i8
+    *end_ptr = 10
+    pos = pos - 1
+    // Write digits right-to-left
+    if n == 0 {
+        end_ptr = (p as i64 + pos) as *i8
+        *end_ptr = 48
+        pos = pos - 1
+    }
+    while n > 0 {
+        let digit: i64 = n % 10
+        end_ptr = (p as i64 + pos) as *i8
+        *end_ptr = (digit + 48) as i8
+        pos = pos - 1
+        n = n / 10
+    }
+    if neg == 1 {
+        end_ptr = (p as i64 + pos) as *i8
+        *end_ptr = 45
+        pos = pos - 1
+    }
+    let start: *i8 = (p as i64 + pos + 1) as *i8
+    let len: i64 = 23 - pos
+    write(1, start, len)
+    free(buf)
+    return 0
+}
+
+fn main() -> i64 {
+    print_num(42)
+    print_num(12345)
+    print_num(0)
+    return 0
+}
