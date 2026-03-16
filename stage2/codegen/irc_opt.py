@@ -618,46 +618,88 @@ class IRCompiler:
                         i += 2  # skip both the sub/add and the cmp
                         continue
 
-            # Fold: "op xD, xS, ..." followed by "mov xT, xD" where xD is not
-            # also a source operand => change op's destination to xT and remove mov.
+            # Fold: "op xD, xS, ..." followed (possibly with gap) by "mov xT, xD"
+            # where xD is not also a source operand and intermediate instructions
+            # don't interfere. Change op's destination to xT and remove mov.
             # This handles phi copy residues like: asr x12, x9, #1; mov x9, x12
-            # ARM64 instructions read all sources before writing, so xT can equal
-            # a source register safely.
+            # and also: add x12, x10, #1; add x11, x11, #1; mov x10, x12
             did_redirect = False
-            if i + 1 < len(lines):
-                next_stripped = lines[i + 1].strip()
-                if next_stripped.startswith('mov '):
-                    mov_parts = next_stripped[4:].split(',')
-                    if len(mov_parts) == 2:
-                        mov_dst = mov_parts[0].strip()
-                        mov_src = mov_parts[1].strip()
-                        # Check if current line produces mov_src as its destination
-                        # Only handle simple cases: result of arithmetic/shift ops
-                        for prefix in ('asr ', 'lsl ', 'lsr ', 'add ', 'sub ',
-                                       'mul ', 'and ', 'orr ', 'eor ', 'sdiv ',
-                                       'movz ', 'movn '):
-                            if stripped.startswith(prefix):
-                                instr_parts = stripped[len(prefix):].split(',')
-                                if len(instr_parts) >= 2:
-                                    instr_dst = instr_parts[0].strip()
-                                    if instr_dst == mov_src and instr_dst != mov_dst:
-                                        # Check mov_src is not also a source operand.
-                                        # If it is, the instruction reads and writes the
-                                        # same register (like add x12, x12, #1), meaning
-                                        # it's an in-place update that may be needed later.
-                                        # Parse source operands properly (strip commas/spaces).
-                                        src_tokens = set()
-                                        for part in instr_parts[1:]:
-                                            token = part.strip().rstrip(',').lstrip(',')
-                                            src_tokens.add(token)
-                                        if mov_src not in src_tokens:
-                                            # Safe: mov_src is a fresh destination not read
-                                            # by this instruction. Redirect output to mov_dst.
+            _REDIRECT_PREFIXES = ('asr ', 'lsl ', 'lsr ', 'add ', 'sub ',
+                                  'mul ', 'and ', 'orr ', 'eor ', 'sdiv ',
+                                  'msub ', 'madd ', 'movz ', 'movn ')
+            for prefix in _REDIRECT_PREFIXES:
+                if stripped.startswith(prefix):
+                    instr_parts = stripped[len(prefix):].split(',')
+                    if len(instr_parts) >= 2:
+                        instr_dst = instr_parts[0].strip()
+                        # Parse source operands for safety checks
+                        src_tokens = set()
+                        for part in instr_parts[1:]:
+                            for token in part.strip().replace(',', ' ').split():
+                                if token.startswith('x') or token.startswith('w'):
+                                    src_tokens.add(token)
+                        # Look ahead up to 3 instructions for a mov consuming instr_dst
+                        for gap in range(1, min(4, len(lines) - i)):
+                            raw_line = lines[i + gap]
+                            candidate = raw_line.strip()
+                            # Stop at labels (lines not starting with whitespace)
+                            if candidate and not raw_line[0].isspace():
+                                break
+                            if not candidate:
+                                continue
+                            if candidate.startswith(('b ', 'b.', 'bl ', 'cb', 'tb',
+                                                     'ret', 'stp', 'ldp', 'str ',
+                                                     'ldr ', 'ldrb', 'strb')):
+                                break  # control flow or memory op, stop
+                            if candidate.startswith('mov '):
+                                mov_parts = candidate[4:].split(',')
+                                if len(mov_parts) == 2:
+                                    mov_dst = mov_parts[0].strip()
+                                    mov_src = mov_parts[1].strip()
+                                    if mov_src == instr_dst and mov_dst != instr_dst:
+                                        # Check: instr_dst is not a source (self-update)
+                                        if instr_dst in src_tokens:
+                                            break
+                                        # Check: intermediate instructions don't
+                                        # read instr_dst or write to mov_dst
+                                        safe = True
+                                        for mid in range(1, gap):
+                                            mid_s = lines[i + mid].strip()
+                                            # Extract all register tokens from mid instruction
+                                            mid_tokens = set()
+                                            for tok in mid_s.replace(',', ' ').replace('[', ' ').replace(']', ' ').split():
+                                                if tok.startswith('x') or tok.startswith('w'):
+                                                    mid_tokens.add(tok)
+                                            # If mid reads instr_dst, can't redirect
+                                            if instr_dst in mid_tokens:
+                                                safe = False
+                                                break
+                                            # If mid writes to mov_dst, can't redirect
+                                            # (first token after opcode is usually dest)
+                                            mid_parts = mid_s.split()
+                                            if len(mid_parts) >= 2:
+                                                mid_dst_cand = mid_parts[1].rstrip(',')
+                                                if mid_dst_cand == mov_dst:
+                                                    safe = False
+                                                    break
+                                        if safe:
                                             new_instr = f'    {prefix}{mov_dst},{",".join(instr_parts[1:])}'
                                             result.append(new_instr)
-                                            i += 2
+                                            # Emit intermediate instructions
+                                            for mid in range(1, gap):
+                                                result.append(lines[i + mid])
+                                            # Skip the mov
+                                            i += gap + 1
                                             did_redirect = True
-                                break
+                                break  # found a mov or barrier, stop looking
+                            # Check if this intermediate instruction writes to instr_dst
+                            # (would invalidate the redirect)
+                            inter_parts = candidate.split()
+                            if len(inter_parts) >= 2:
+                                inter_dst = inter_parts[1].rstrip(',')
+                                if inter_dst == instr_dst:
+                                    break  # instr_dst is overwritten, stop
+                    break  # only match one prefix
             if did_redirect:
                 continue
 
