@@ -284,27 +284,64 @@ Writing an assembler in assembly, then an IR compiler in assembly, then optimizi
 
 ---
 
-## 5. What's Next
+## 5. Stage 3: Language Frontend (Completed)
 
-### Stage 3: Language Frontend
-- Design surface syntax (C-like with modern ergonomics)
-- Parser → IR emitter
-- Type system (at minimum: integers, pointers, arrays, structs)
-- Standard library stubs (print, malloc, file I/O via libSystem)
+### Language Design
+A C-like language with modern ergonomics:
+```
+fn collatz_steps(n: i64) -> i64 {
+    let steps: i64 = 0
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2
+        } else {
+            n = n * 3 + 1
+        }
+        steps = steps + 1
+    }
+    return steps
+}
+```
 
-### Optimization Improvements
-- **Graph coloring register allocation** for better register usage in complex CFGs
-- **Loop unrolling** at the IR level (4x unroll for simple counted loops)
-- **Instruction scheduling** to reduce pipeline stalls
-- **Inlining** for small functions (especially relevant for gcd/collatz)
+Features: `fn`/`let`/`return`/`if`/`else`/`while`/`break`/`continue`, types `i64`/`i8`/`*T`/`void`, `extern` FFI declarations, `as` casts, pointer operations, array indexing.
+
+### Frontend Architecture
+- **Lexer** (`lexer.py`): Newline-terminated statements (no semicolons), 40+ token types
+- **Parser** (`parser.py`): Recursive descent, 14-level operator precedence
+- **Type Checker** (`typechecker.py`): Symbol table with scope stack, type inference
+- **IR Emitter** (`ir_emitter.py`): AST → SSA IR with automatic phi-node insertion for if/else and while loops using the Braun et al. algorithm
+
+### SSA Construction Quality
+The frontend-generated IR matches hand-written IR in quality. The optimizing backend produces **identical performance** from both sources:
+
+| Benchmark | Hand-written IR | .lang compiled | Match? |
+|-----------|-----------------|----------------|--------|
+| fib | 10ms | 10ms | Identical |
+| sum | 30ms | 30ms | Identical |
+| power | 60ms | 60ms | Identical |
+| collatz | 30ms | 30ms | Identical |
+
+### Test Results: 9/9 passing
+ret, arithmetic, if/else, while loops, function calls, fibonacci, nested loops, if-variable-update, collatz
+
+---
+
+## 6. What's Next
+
+### Optimization Opportunities
+- **Function inlining** for small functions (collatz inner loop)
+- **Loop unrolling** at the IR level
 - **Tail call optimization** for recursive patterns
+- **Struct support** in the language (field access via pointer offsets)
+- **String literals** and print functionality
 - **SIMD/NEON** vectorization for data-parallel loops
 
-### Toolchain Improvements
+### Toolchain Maturation
 - Complete `@PAGE`/`@PAGEOFF` relocation support in Stage 0 assembler
-- Self-hosting: rewrite the assembler in our language
+- Self-hosting: rewrite the toolchain in our language
 - Debug info generation (DWARF)
 - Incremental compilation
+- Error recovery in parser
 
 ---
 
@@ -354,6 +391,17 @@ stage2/                        # Optimization framework
     revert.sh                  # Safe rollback
   build_optimized.sh           # Full optimized build pipeline
 
+stage3/                        # Language frontend (Python)
+  compiler.py                  # Main driver
+  lexer.py                     # Tokenizer
+  parser.py                    # Recursive descent parser
+  ast_nodes.py                 # AST node definitions
+  typechecker.py               # Type checker
+  ir_emitter.py                # AST → SSA IR emitter
+  build.sh                     # .lang → executable pipeline
+  tests/                       # 9 test programs + runner
+  examples/                    # Benchmark programs in .lang
+
 Project.md                     # Project specification
 report.md                      # This report
 ```
@@ -377,5 +425,11 @@ USE_OPT_COMPILER=1 bash eval.sh
 python3 stage2/codegen/irc_opt.py stage2/bench/benchmarks/fib.ir > /tmp/fib.s
 as -arch arm64 -o /tmp/fib.o /tmp/fib.s
 ld -arch arm64 -lSystem -syslibroot $(xcrun --show-sdk-path) -e _main -o /tmp/fib /tmp/fib.o
+time /tmp/fib
+
+# Compile a .lang program
+cd stage3
+bash build.sh examples/fib_bench.lang /tmp/fib_lang
+time /tmp/fib_lang
 time /tmp/fib
 ```
