@@ -8,10 +8,14 @@ Improvements over Stage 1:
   - Phi node lowering with register-to-register moves
   - Dead code elimination for unused values
   - Compare+branch fusion
+  - Strength reduction for multiply by small constants
+  - Better branch layout (eliminate unnecessary labels and branches)
+  - cbz/cbnz for compare-against-zero patterns
 """
 
 import sys
 import re
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -273,6 +277,23 @@ def invert_cond(cond):
     inv = {'eq': 'ne', 'ne': 'eq', 'lt': 'ge', 'ge': 'lt',
            'gt': 'le', 'le': 'gt'}
     return inv[cond]
+
+
+def strength_reduce_mul(v):
+    """Return (type, shift) for single-instruction strength reduction, or None.
+
+    For power-of-2 values: replace mul with lsl.
+    For (2^k + 1) values: replace mul with add with lsl (e.g., x + x<<k).
+    """
+    if v <= 0:
+        return None
+    # Power of 2: use lsl
+    if v & (v - 1) == 0:
+        return ('lsl', int(math.log2(v)))
+    # 2^k + 1: use add with lsl (src + src << k = src * (2^k + 1))
+    if v >= 3 and (v - 1) & (v - 2) == 0:
+        return ('add_lsl', int(math.log2(v - 1)))
+    return None
 
 
 def get_used_vregs(instr):
@@ -569,6 +590,9 @@ class IRCompiler:
             if instr.op in _REG_ONLY_OPS:
                 for op in instr.operands:
                     if is_immediate(op) and imm_val(op) != 0:
+                        # Skip mul constants that can be strength-reduced
+                        if instr.op == 'mul' and strength_reduce_mul(imm_val(op)):
+                            continue
                         _pre_needs.add(imm_val(op))
             elif instr.op in CMP_OPS:
                 for op in instr.operands:
@@ -748,6 +772,9 @@ class IRCompiler:
                     if is_immediate(op):
                         v = imm_val(op)
                         if v != 0:  # 0 can use xzr
+                            # Skip mul constants that can be strength-reduced
+                            if instr.op == 'mul' and strength_reduce_mul(v):
+                                continue
                             needs_preload.add(v)
             elif instr.op in CMP_OPS:
                 for op in instr.operands:
@@ -840,9 +867,33 @@ class IRCompiler:
                 elif instr.op == 'mul':
                     lhs, rhs = instr.operands
                     dst = result_reg(instr)
-                    lhs_r = load_operand(lhs, SCRATCH1)
-                    rhs_r = load_operand(rhs, SCRATCH2)
-                    self.output.append(f'    mul {dst}, {lhs_r}, {rhs_r}')
+
+                    # Try strength reduction: replace mul by constant with lsl/add
+                    sr_done = False
+                    if is_immediate(rhs):
+                        sr = strength_reduce_mul(imm_val(rhs))
+                        if sr:
+                            lhs_r = load_operand(lhs, SCRATCH1)
+                            if sr[0] == 'lsl':
+                                self.output.append(f'    lsl {dst}, {lhs_r}, #{sr[1]}')
+                            else:  # add_lsl
+                                self.output.append(f'    add {dst}, {lhs_r}, {lhs_r}, lsl #{sr[1]}')
+                            sr_done = True
+                    elif is_immediate(lhs):
+                        sr = strength_reduce_mul(imm_val(lhs))
+                        if sr:
+                            rhs_r = load_operand(rhs, SCRATCH1)
+                            if sr[0] == 'lsl':
+                                self.output.append(f'    lsl {dst}, {rhs_r}, #{sr[1]}')
+                            else:  # add_lsl
+                                self.output.append(f'    add {dst}, {rhs_r}, {rhs_r}, lsl #{sr[1]}')
+                            sr_done = True
+
+                    if not sr_done:
+                        # Fall back to regular mul
+                        lhs_r = load_operand(lhs, SCRATCH1)
+                        rhs_r = load_operand(rhs, SCRATCH2)
+                        self.output.append(f'    mul {dst}, {lhs_r}, {rhs_r}')
                     store_result(instr.result, dst)
 
                 elif instr.op == 'div':
@@ -930,40 +981,102 @@ class IRCompiler:
                     true_phis = self._get_phi_move_list(func, bname, true_label)
                     false_phis = self._get_phi_move_list(func, bname, false_label)
 
+                    # Determine condition and emit comparison
+                    use_cbz = False
+                    cbz_reg = None
                     if cond_vreg in cmp_fuseable and cond_vreg in cmp_info:
                         ci = cmp_info[cond_vreg]
                         cond = CMP_OPS[ci.op]
-                        self._emit_cmp(ci.operands[0], ci.operands[1], load_operand)
+                        cmp_lhs, cmp_rhs = ci.operands[0], ci.operands[1]
+                        # Use cbz/cbnz when comparing against zero with eq/ne
+                        if cond in ('eq', 'ne') and is_immediate(cmp_rhs) and imm_val(cmp_rhs) == 0:
+                            cbz_reg = load_operand(cmp_lhs, SCRATCH1)
+                            use_cbz = True
+                        elif cond in ('eq', 'ne') and is_immediate(cmp_lhs) and imm_val(cmp_lhs) == 0:
+                            cbz_reg = load_operand(cmp_rhs, SCRATCH1)
+                            # Swap: cmp 0, x  with eq/ne is same as cmp x, 0
+                            use_cbz = True
+                        else:
+                            self._emit_cmp(cmp_lhs, cmp_rhs, load_operand)
                     else:
-                        # Use cmp against zero
-                        cond_r = load_operand(cond_vreg, SCRATCH1)
-                        self.output.append(f'    cmp {cond_r}, #0')
-                        cond = 'ne'  # cbnz equivalent
+                        # Compare against zero — use cbz/cbnz
+                        cbz_reg = load_operand(cond_vreg, SCRATCH1)
+                        cond = 'ne'
+                        use_cbz = True
 
                     if not true_phis and not false_phis:
+                        # Simple case: no phi copies needed
                         if next_block == false_label:
-                            self.output.append(f'    b.{cond} .LBB_{func.name}_{true_label}')
+                            if use_cbz:
+                                cbz_op = 'cbnz' if cond == 'ne' else 'cbz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, .LBB_{func.name}_{true_label}')
+                            else:
+                                self.output.append(f'    b.{cond} .LBB_{func.name}_{true_label}')
                         elif next_block == true_label:
-                            self.output.append(f'    b.{invert_cond(cond)} .LBB_{func.name}_{false_label}')
+                            if use_cbz:
+                                cbz_op = 'cbz' if cond == 'ne' else 'cbnz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, .LBB_{func.name}_{false_label}')
+                            else:
+                                self.output.append(f'    b.{invert_cond(cond)} .LBB_{func.name}_{false_label}')
                         else:
-                            self.output.append(f'    b.{cond} .LBB_{func.name}_{true_label}')
+                            if use_cbz:
+                                cbz_op = 'cbnz' if cond == 'ne' else 'cbz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, .LBB_{func.name}_{true_label}')
+                            else:
+                                self.output.append(f'    b.{cond} .LBB_{func.name}_{true_label}')
                             self.output.append(f'    b .LBB_{func.name}_{false_label}')
                     else:
-                        # Branch around phi moves
-                        skip_label = f'.LBB_{func.name}_{bname}_to_false'
-                        self.output.append(f'    b.{invert_cond(cond)} {skip_label}')
-                        # True path
-                        self._emit_phi_moves_for_edge(func, bname, true_label,
-                                                       reg_assignment, spill_slots,
-                                                       spill_base, load_operand, ensure_in_reg)
-                        self.output.append(f'    b .LBB_{func.name}_{true_label}')
-                        self.output.append(f'{skip_label}:')
-                        # False path
-                        self._emit_phi_moves_for_edge(func, bname, false_label,
-                                                       reg_assignment, spill_slots,
-                                                       spill_base, load_operand, ensure_in_reg)
-                        if next_block != false_label:
-                            self.output.append(f'    b .LBB_{func.name}_{false_label}')
+                        # Phi copies needed — optimize branch layout
+                        # Case 1: true path has no phi copies, false path does
+                        #   -> branch to true on condition, fall through to false phi copies
+                        if not true_phis and false_phis:
+                            if use_cbz:
+                                cbz_op = 'cbnz' if cond == 'ne' else 'cbz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, .LBB_{func.name}_{true_label}')
+                            else:
+                                self.output.append(f'    b.{cond} .LBB_{func.name}_{true_label}')
+                            # Fall through: false path phi copies
+                            self._emit_phi_moves_for_edge(func, bname, false_label,
+                                                           reg_assignment, spill_slots,
+                                                           spill_base, load_operand, ensure_in_reg)
+                            if next_block != false_label:
+                                self.output.append(f'    b .LBB_{func.name}_{false_label}')
+
+                        # Case 2: false path has no phi copies, true path does
+                        #   -> branch to false on inverted condition, fall through to true phi copies
+                        elif true_phis and not false_phis:
+                            if use_cbz:
+                                cbz_op = 'cbz' if cond == 'ne' else 'cbnz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, .LBB_{func.name}_{false_label}')
+                            else:
+                                self.output.append(f'    b.{invert_cond(cond)} .LBB_{func.name}_{false_label}')
+                            # Fall through: true path phi copies
+                            self._emit_phi_moves_for_edge(func, bname, true_label,
+                                                           reg_assignment, spill_slots,
+                                                           spill_base, load_operand, ensure_in_reg)
+                            if next_block != true_label:
+                                self.output.append(f'    b .LBB_{func.name}_{true_label}')
+
+                        # Case 3: both paths have phi copies — need skip label
+                        else:
+                            skip_label = f'.LBB_{func.name}_{bname}_to_false'
+                            if use_cbz:
+                                cbz_op = 'cbz' if cond == 'ne' else 'cbnz'
+                                self.output.append(f'    {cbz_op} {cbz_reg}, {skip_label}')
+                            else:
+                                self.output.append(f'    b.{invert_cond(cond)} {skip_label}')
+                            # True path
+                            self._emit_phi_moves_for_edge(func, bname, true_label,
+                                                           reg_assignment, spill_slots,
+                                                           spill_base, load_operand, ensure_in_reg)
+                            self.output.append(f'    b .LBB_{func.name}_{true_label}')
+                            self.output.append(f'{skip_label}:')
+                            # False path
+                            self._emit_phi_moves_for_edge(func, bname, false_label,
+                                                           reg_assignment, spill_slots,
+                                                           spill_base, load_operand, ensure_in_reg)
+                            if next_block != false_label:
+                                self.output.append(f'    b .LBB_{func.name}_{false_label}')
 
                 elif instr.op == 'ret':
                     val = instr.operands[0]
