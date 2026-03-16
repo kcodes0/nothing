@@ -5,12 +5,22 @@ Optimizing IR-to-AArch64 compiler with register allocation.
 Improvements over Stage 1:
   - Linear scan register allocation using x19-x28 (callee-saved) + x9-x15 (scratch)
   - Immediate folding for add/sub/cmp when constant fits in 12 bits
-  - Phi node lowering with register-to-register moves
+  - Phi node lowering with register-to-register moves + phi coalescing
   - Dead code elimination for unused values
-  - Compare+branch fusion
-  - Strength reduction for multiply by small constants
+  - Compare+branch fusion (cmp+br_cond -> single conditional branch)
+  - Strength reduction for multiply by small constants (lsl, add with shift)
+  - Strength reduction for div/mod by power of 2 (asr, and)
   - Better branch layout (eliminate unnecessary labels and branches)
   - cbz/cbnz for compare-against-zero patterns
+  - IR-level constant folding (add/sub/mul/and/or/xor/shl/shr/div/mod/cmp)
+  - IR-level identity elimination (add X,0 -> X; mul X,1 -> X; sub X,0 -> X)
+  - Peephole: redundant mov elimination (mov xA, xA)
+  - Peephole: fall-through branch elimination (b .L followed by .L:)
+  - Peephole: subs/adds fusion (sub+cmp #0 -> subs, eliminating cmp)
+  - Peephole: and+cbnz/cbz -> tst+b.ne/b.eq (eliminates register write)
+  - Peephole: destination redirect (op xD, ...; mov xT, xD -> op xT, ...)
+  - Peephole: copy propagation (mov xT, xS; use xT -> use xS)
+  - Constant preloading: hoist loop-invariant large constants into callee-saved regs
 """
 
 import sys
